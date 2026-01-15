@@ -41,7 +41,7 @@ class LlavaLlamaDynamicForCausalLM(LlamaDynamicvitForCausalLM, LlavaMetaForCausa
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_model(self):
+    def get_model(self):  
         return self.model
 
     def forward(
@@ -61,7 +61,7 @@ class LlavaLlamaDynamicForCausalLM(LlamaDynamicvitForCausalLM, LlavaMetaForCausa
         image_shape = 576,
         token_length_list = [],
         pre_prompt_length_list = [],
-        retained_tokens = 192,
+        retained_tokens = 192
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         if inputs_embeds is None:
@@ -108,6 +108,7 @@ class LlavaLlamaDynamicForCausalLM(LlamaDynamicvitForCausalLM, LlavaMetaForCausa
         inputs: Optional[torch.Tensor] = None,
         images: Optional[torch.Tensor] = None,
         image_sizes: Optional[torch.Tensor] = None,
+        task_id=None,  # 🔥 新增参数
         retained_tokens = 192,
         image_shape=576,
         token_length_list = [],
@@ -141,6 +142,21 @@ class LlavaLlamaDynamicForCausalLM(LlamaDynamicvitForCausalLM, LlavaMetaForCausa
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
+
+        # 将 task_id 存储到模型中，供 forward 使用
+        if task_id is not None:
+            self.current_task_id = task_id
+            self.model.current_task_id = task_id  # 🔥 同时设置到 self.model，供 LlamaDynamicvitModel.forward() 使用
+        else:
+            self.current_task_id = None
+            self.model.current_task_id = None
+        
+        # 🔥 检查是否需要收集剪枝掩码（通过kwargs传递）
+        collect_masks = kwargs.pop('collect_pruning_masks', False)
+        if collect_masks:
+            self.model.collect_pruning_masks = True
+            self.model.pruning_masks = {}
+            self.model.pruning_masks_info = {}
 
         return super().generate(
             position_ids=position_ids,
