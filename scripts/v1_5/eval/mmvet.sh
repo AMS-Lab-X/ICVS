@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export CUDA_VISIBLE_DEVICES=0
 python -m llava.eval.model_vqa \
     --model-path /home/cwd/models/llava-v1.5-7b \
     --question-file ./playground/data/eval/mm-vet/llava-mm-vet.jsonl \

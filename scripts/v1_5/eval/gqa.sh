@@ -19,8 +19,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --chunk-idx $IDX \
         --temperature 0 \
         --conv-mode vicuna_v1 \
-        --retained_tokens 64 \
-        --classifier-path  /home/cwd/codes/SparseVLMs/checkpoints/prompt_classifier_add/best_model.pth &
+        --retained_tokens 64  &
 done
 
 wait

@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export CUDA_VISIBLE_DEVICES=0
 SPLIT="mmbench_dev_20230712"
 
 python -m llava.eval.model_vqa_mmbench \

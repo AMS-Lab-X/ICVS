@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export CUDA_VISIBLE_DEVICES=0
 python -m llava.eval.model_vqa_science \
     --model-path /home/cwd/models/llava-v1.5-7b \
     --question-file ./playground/data/eval/scienceqa/llava_test_CQM-A.json \
