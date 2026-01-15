@@ -96,7 +96,11 @@ class LlamaDynamicvitModel(LlamaModel):
         self.gradient_checkpointing = False
         self.all_FLOPs = 0
         # Initialize weights and apply final processing
-        self.post_init()
+        # self.post_init()
+        # 🔥 用于收集剪枝掩码用于可视化
+        self.collect_pruning_masks = False
+        self.pruning_masks = {}  # {layer_idx: mask} 只收集Layer 2的mask
+        self.pruning_masks_info = {}  # {layer_idx: {'v_token_num': ..., 'image_shape': ...}}
         
     def forward(
         self,
@@ -121,6 +125,8 @@ class LlamaDynamicvitModel(LlamaModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # 获取当前的 task_id  这里的self指的是self.model
+        task_id = getattr(self, 'current_task_id', None)
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -264,7 +270,7 @@ class LlamaDynamicvitModel(LlamaModel):
 
                     attn_logits = layer_outputs[2]
                     
-                    pred_score_vis, s_flag, relation_vis_text = attn_postprocess_topk(attn_logits, v_token_start, v_token_num, text_token_start, t_token_idx, layer_idx,retained_tokens) # B, L_v
+                    pred_score_vis, s_flag, relation_vis_text = attn_postprocess_topk(attn_logits, v_token_start, v_token_num, text_token_start, t_token_idx, layer_idx,retained_tokens, task_id) # B, L_v
                     policy = torch.ones(B, hidden_states.shape[1], dtype=hidden_states.dtype, device=hidden_states.device)
                     policy[:, v_token_start:text_token_start] = pred_score_vis.type(dtype = hidden_states.dtype)
 
@@ -277,23 +283,40 @@ class LlamaDynamicvitModel(LlamaModel):
                         policy[batch, text_token_start:,] = 1
 
                     total_sparse_token_idx = torch.where(policy == 0)[1].unsqueeze(0)  
-                    # merge and cluster
+ # merge and cluster
                     if s_flag and total_sparse_token_idx.shape[1]>0:
 
                         total_sparse_token_idx = torch.where(policy == 0)[1].unsqueeze(0)  
-                        total_sparse_token = batch_index_select(layer_outputs[0], total_sparse_token_idx) 
+                        total_sparse_token = batch_index_select(layer_outputs[0], total_sparse_token_idx) #drop的所有token
                         
-                        merge_token_idx_stage1 = torch.where(pred_score_vis==0)[1]
-                        merge_token_stage1 = relation_vis_text[0][merge_token_idx_stage1]
-                        merge_token_num_stage1 = int(merge_token_idx_stage1.shape[0] * 0.3 ) + 1 # Top 30%
-                        merge_token_stage2_idx = merge_token_stage1.topk(merge_token_num_stage1)[1]
+                        # merge_token_idx_stage1 = torch.where(pred_score_vis==0)[1]
+                        # merge_token_stage1 = relation_vis_text[0][merge_token_idx_stage1]
+                        # merge_token_num_stage1 = int(merge_token_idx_stage1.shape[0] * 0.3 ) + 1 # Top 30%
+                        # merge_token_stage2_idx = merge_token_stage1.topk(merge_token_num_stage1)[1]
                        
-                        merge_token_stage2 = total_sparse_token[:,merge_token_stage2_idx,:]
-                        cluster_num = int(merge_token_stage2.shape[1] / 10) + 1       
-                        if (cluster_num == 0) :
-                            cluster_num = merge_token_stage2.shape[1]
+                        # merge_token_stage2 = total_sparse_token[:,merge_token_stage2_idx,:]
+
+                        # drop 的所有视觉 token
+                        merge_token_stage2 = total_sparse_token           # (1, N_drop, C)
+                        # 对应的信息分数（text-vision attention）
+                        merge_token_info = relation_vis_text[0][
+                            torch.where(pred_score_vis == 0)[1]
+                        ]  # (N_drop,)
+                        merge_token_info = merge_token_info.unsqueeze(0)  # (1, N_drop)
+
+                        merge_sparse_token = iatr_dpc_cluster_and_merge(
+                            merge_token_stage2,          # (1, N_drop, C)
+                            merge_token_info,            # (1, N_drop)
+                            k=8,
+                            score_percentile=0.9         # 可调：0.85 ~ 0.95
+                        )
+                        cluster_num = merge_sparse_token.shape[1]
+
+                        # cluster_num = int(merge_token_stage2.shape[1] / 10) + 1       
+                        # if (cluster_num == 0) :
+                        #     cluster_num = merge_token_stage2.shape[1]
                         
-                        merge_sparse_token = cluster_and_merge(merge_token_stage2, cluster_num)  
+                        # merge_sparse_token = cluster_and_merge(merge_token_stage2, cluster_num)  
 
                         select_token_idx = torch.where(policy == 1)[1].unsqueeze(0)  # B, L_new
                         select_token = batch_index_select(layer_outputs[0], select_token_idx)
@@ -309,16 +332,6 @@ class LlamaDynamicvitModel(LlamaModel):
                         prev_decision = policy
                         # update
                         v_token_num = pred_score_vis.sum() + cluster_num # B == 1
-                        # print(layer_idx, v_token_num)
-                        text_token_start = v_token_start + v_token_num
-                    else:
-                        select_token_idx = torch.where(policy == 1)[1].unsqueeze(0)  # B, L_new
-                        layer_outputs = (batch_index_select(layer_outputs[0], select_token_idx), layer_outputs[1])  # B, L, C
-                        position_ids = position_ids[:, :len(select_token_idx[0])]
-                        prev_decision = policy
-                        
-                        # update
-                        v_token_num = pred_score_vis.sum() # B == 1
                         # print(layer_idx, v_token_num)
                         text_token_start = v_token_start + v_token_num
 

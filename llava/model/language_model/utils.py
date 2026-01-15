@@ -309,3 +309,65 @@ def cluster_and_merge(x, cluster_num):
     x_merged = x_merged.reshape(B, cluster_num, C)
     
     return x_merged
+
+def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9):
+    """
+    x: (B, N, C) dropped visual tokens
+    info_score: (B, N) information score per token
+    """
+
+    B, N, C = x.shape
+
+    # ---------- 1. cosine distance高维空间使用语义距离代替欧式距离----------
+    x_norm = x / (x.norm(dim=-1, keepdim=True) + 1e-6)
+    dist = 1 - torch.matmul(x_norm, x_norm.transpose(-1, -2))  # (B, N, N)
+
+    # ---------- 2. information-weighted density 信息加权密度----------
+    knn_dist, knn_idx = torch.topk(dist, k=k, largest=False)
+    knn_info = index_points(info_score.unsqueeze(-1), knn_idx).squeeze(-1)
+
+    density = torch.sum(torch.exp(-knn_dist) * knn_info, dim=-1)  # (B, N)
+
+    density += torch.rand_like(density) * 1e-6  # avoid ties
+
+    # ---------- 3. delta distance ----------
+    mask = density[:, None, :] > density[:, :, None]
+    dist_max = dist.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0]
+
+    delta = (dist * mask + dist_max * (~mask)).min(dim=-1)[0]
+
+    # ---------- 4. center score ----------
+    score = density * delta
+
+    # ---------- 5. adaptive center selection ----------
+    thresh = torch.quantile(score.float(), score_percentile, dim=-1, keepdim=True)
+    centers = score >= thresh  # (B, N)
+
+    center_idx = torch.where(centers)[1]
+    if center_idx.numel() == 0:
+        idx = torch.argmax(info_score[0])
+        return x[:, idx:idx+1, :]
+
+    # ---------- 6. assignment ----------
+    dist_to_centers = dist[:, :, center_idx]
+    assign = dist_to_centers.argmin(dim=-1)
+
+    # ---------- 7. information-weighted merge ----------
+    merged = []
+    for c in range(center_idx.numel()):
+        mask_c = (assign[0] == c)        # (N_drop,)
+
+        if mask_c.sum() == 0:
+            continue
+
+        # token features
+        x_c = x[0][mask_c]               # (N_c, C)
+
+        # information-aware weights
+        w = torch.softmax(info_score[0][mask_c], dim=0)  # (N_c,)
+
+        merged_token = (x_c * w.unsqueeze(-1)).sum(dim=0)  # (C,)
+        merged.append(merged_token)
+
+    merged = torch.stack(merged, dim=0).unsqueeze(0)  # (1, K, C)
+    return merged
