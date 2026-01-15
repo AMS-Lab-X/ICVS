@@ -26,7 +26,7 @@ def attn_postprocess_topk(self_attn_weights, v_token_start, v_token_num, text_to
     relation_vis_text = relation_vis_text.mean(1) # B, L1
 
     relation_vis = relation_vis_text
-    s_flag = True       # s_flag controls whether token merge is needed.
+    s_flag = False      # s_flag controls whether token merge is needed.
 
     sparse_token_list = sparse_token_dict[retained_tokens]
 
