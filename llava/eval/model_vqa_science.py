@@ -14,6 +14,9 @@ from llava.mm_utils import tokenizer_image_token, process_images, get_model_name
 from PIL import Image
 import math
 
+# 🔥 导入分类器
+from llava.classifier import PromptTaskClassifier, CATEGORY_MAPPING, ID_TO_CATEGORY
+
 
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
@@ -33,6 +36,25 @@ def eval_model(args):
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
+    # 🔥 初始化分类器
+    classifier = None
+    if args.classifier_path:
+        print(f"\n{'='*80}")
+        print(f"Loading prompt classifier from {args.classifier_path}")
+        try:
+            classifier = PromptTaskClassifier(
+                model_path=args.classifier_path,
+                num_classes=14
+            )
+            print("✓ Classifier loaded successfully!")
+            print(f"  Will use task-specific attention heads for better performance")
+            print(f"{'='*80}\n")
+        except Exception as e:
+            print(f"✗ Failed to load classifier: {e}")
+            print(f"  Will use default attention head")
+            print(f"{'='*80}\n")
+            classifier = None
+
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
     answers_file = os.path.expanduser(args.answers_file)
@@ -40,12 +62,22 @@ def eval_model(args):
     ans_file = open(answers_file, "w")
 
     retained_tokens = args.retained_tokens
+    
+    # 🔥 统计信息
+    classification_stats = {
+        'total': 0,
+        'correct': 0,
+        'by_category': {cat: {'total': 0, 'correct': 0} for cat in ID_TO_CATEGORY.values()}
+    }
 
     for i, line in enumerate(tqdm(questions)):
         idx = line["id"]
         question = line['conversations'][0]
         qs = question['value'].replace('<image>', '').strip()
         cur_prompt = qs
+        
+        # 🔥 获取真实类别（如果数据中有）
+        true_category = line.get("category", "Unknown")
 
         if 'image' in line:
             image_file = line["image"]
@@ -66,6 +98,28 @@ def eval_model(args):
             qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
             cur_prompt = cur_prompt + '\n' + "Answer with the option's letter from the given choices directly."
 
+        # 🔥 使用分类器预测任务类型
+        predicted_task_id = None
+        predicted_category = None
+        confidence = 0.0
+        
+        if classifier is not None:
+            try:
+                predicted_task_id, confidence, predicted_category, _ = classifier.predict(cur_prompt)
+                
+                # 统计分类准确率
+                classification_stats['total'] += 1
+                if predicted_category == true_category:
+                    classification_stats['correct'] += 1
+                
+                if true_category in classification_stats['by_category']:
+                    classification_stats['by_category'][true_category]['total'] += 1
+                    if predicted_category == true_category:
+                        classification_stats['by_category'][true_category]['correct'] += 1
+                
+            except Exception as e:
+                print(f"Classifier error for question {idx}: {e}")
+
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
@@ -78,7 +132,8 @@ def eval_model(args):
                 input_ids,
                 images=images,
                 image_sizes=image_sizes,
-                retained_tokens = retained_tokens,
+                retained_tokens=retained_tokens,
+                task_id=predicted_task_id,  # 🔥 传递任务ID到模型
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 max_new_tokens=1024,
@@ -88,14 +143,51 @@ def eval_model(args):
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
         ans_id = shortuuid.uuid()
-        ans_file.write(json.dumps({"question_id": idx,
-                                   "prompt": cur_prompt,
-                                   "text": outputs,
-                                   "answer_id": ans_id,
-                                   "model_id": model_name,
-                                   "metadata": {}}) + "\n")
+        result = {
+            "question_id": idx,
+            "prompt": cur_prompt,
+            "text": outputs,
+            "answer_id": ans_id,
+            "model_id": model_name,
+            "metadata": {
+                "true_category": true_category,
+                "predicted_category": predicted_category,
+                "predicted_task_id": predicted_task_id,
+                "classification_confidence": confidence,
+            }
+        }
+        
+        ans_file.write(json.dumps(result) + "\n")
         ans_file.flush()
+    
     ans_file.close()
+    
+    # 🔥 打印统计结果
+    if classifier is not None and classification_stats['total'] > 0:
+        print(f"\n{'='*80}")
+        print("CLASSIFICATION STATISTICS")
+        print(f"{'='*80}")
+        
+        overall_acc = 100 * classification_stats['correct'] / classification_stats['total']
+        print(f"Overall Accuracy: {overall_acc:.2f}% ({classification_stats['correct']}/{classification_stats['total']})")
+        print(f"\nPer-Category Accuracy:")
+        print(f"{'Category':<30} {'Correct':<10} {'Total':<10} {'Accuracy':<10}")
+        print(f"{'-'*60}")
+        
+        for cat_name in sorted(classification_stats['by_category'].keys()):
+            stats = classification_stats['by_category'][cat_name]
+            if stats['total'] > 0:
+                acc = 100 * stats['correct'] / stats['total']
+                print(f"{cat_name:<30} {stats['correct']:<10} {stats['total']:<10} {acc:.2f}%")
+        
+        print(f"{'='*80}\n")
+        
+        # 保存统计结果
+        stats_file = answers_file.replace('.jsonl', '_classification_stats.json')
+        with open(stats_file, 'w') as f:
+            json.dump(classification_stats, f, indent=2)
+        print(f"Classification statistics saved to: {stats_file}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -111,6 +203,11 @@ if __name__ == "__main__":
     parser.add_argument("--answer-prompter", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
     parser.add_argument("--retained_tokens", type=int, default=192)
+    
+    # 🔥 分类器参数
+    parser.add_argument("--classifier-path", type=str, default=None,
+                        help="Path to the trained classifier model")
+    
     args = parser.parse_args()
 
     eval_model(args)
