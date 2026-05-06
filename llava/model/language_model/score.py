@@ -14,8 +14,10 @@ sparse_token_list_192 = [300, 200, 110]
 sparse_token_list_128 = [303, 110, 36]
 sparse_token_list_64 = [66, 30, 17]
 sparse_token_list_576 = [576, 576, 576]
+# sparse_token_list_576 = [1, 1, 1]
 sparse_token_list_48 = [30, 10, 7]
 sparse_token_list_96 = [120, 64, 48]
+sparse_token_list_288 = [288, 288, 288]
 
 sparse_token_dict = {
     192: sparse_token_list_192,
@@ -23,7 +25,8 @@ sparse_token_dict = {
     64: sparse_token_list_64,
     576: sparse_token_list_576,
     48: sparse_token_list_48,
-    96: sparse_token_list_96
+    96: sparse_token_list_96,
+    288: sparse_token_list_288
 }
 
 TASK_LABELS = [
@@ -92,11 +95,14 @@ def attn_postprocess_topk(self_attn_weights, v_token_start, v_token_num,
     relation_vis_text = self_attn_weights[:, t_token_idx, v_token_start: v_token_start+v_token_num] #选取文本Q-视觉K
     relation_vis_text = relation_vis_text.mean(1)
     relation_vis = relation_vis_text
-    s_flag = True
+    s_flag = True #决定是否回收
 
     
 
     sparse_token_list = sparse_token_dict[retained_tokens]
+    if layer_idx == 2:
+        print(f"[Score] retained_tokens={retained_tokens}, sparse_token_list={sparse_token_list}")
+
 
     if v_token_num != 0:
         mask = torch.zeros_like(relation_vis, dtype=bool)

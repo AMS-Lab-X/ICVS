@@ -1,7 +1,6 @@
 import copy
 import inspect
 import warnings
-import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -102,8 +101,6 @@ class LlamaDynamicvitModel(LlamaModel):
         self.collect_pruning_masks = False
         self.pruning_masks = {}  # {layer_idx: mask} 只收集Layer 2的mask
         self.pruning_masks_info = {}  # {layer_idx: {'v_token_num': ..., 'image_shape': ...}}
-        self.last_profile = {}
-        self.profile_history = []
         
     def forward(
         self,
@@ -221,22 +218,8 @@ class LlamaDynamicvitModel(LlamaModel):
             total_end_event = torch.cuda.Event(enable_timing=True)
             torch.cuda.synchronize()
             total_start_event.record()
-            sample_recycle_time_ms = 0.0
-            sample_recycle_cluster_only_time_ms = 0.0
-            sample_recycle_complexity = 0.0
-            sample_recycle_calls = 0
-            sample_last_layer_memory_mb = 0.0
-            sample_last_layer_allocated_mb = 0.0
-            sample_last_layer_reserved_mb = 0.0
 
         for layer_idx, decoder_layer in enumerate(self.layers):
-            is_last_layer = (layer_idx == self.num_layers - 1)
-            if is_last_layer and hidden_states.is_cuda:
-                last_layer_mem_before = torch.cuda.memory_allocated(device=hidden_states.device)
-                sample_last_layer_allocated_mb = float(last_layer_mem_before / (1024 ** 2))
-                sample_last_layer_reserved_mb = float(
-                    torch.cuda.memory_reserved(device=hidden_states.device) / (1024 ** 2)
-                )
             if (len(pre_prompt_length_list) != 0 and hidden_states.shape[1] !=1):       
                 n = hidden_states.shape[1]                                  # token num
                 d = hidden_states.shape[2]                                  # hidden state size 
@@ -302,13 +285,6 @@ class LlamaDynamicvitModel(LlamaModel):
                     total_sparse_token_idx = torch.where(policy == 0)[1].unsqueeze(0)  
  # merge and cluster
                     if s_flag and total_sparse_token_idx.shape[1]>0:
-                        if hidden_states.is_cuda:
-                            recycle_start_event = torch.cuda.Event(enable_timing=True)
-                            recycle_end_event = torch.cuda.Event(enable_timing=True)
-                            torch.cuda.synchronize()
-                            recycle_start_event.record()
-                        else:
-                            recycle_start_time = time.perf_counter()
 
                         total_sparse_token_idx = torch.where(policy == 0)[1].unsqueeze(0)  
                         total_sparse_token = batch_index_select(layer_outputs[0], total_sparse_token_idx) #drop的所有token
@@ -328,32 +304,13 @@ class LlamaDynamicvitModel(LlamaModel):
                         ]  # (N_drop,)
                         merge_token_info = merge_token_info.unsqueeze(0)  # (1, N_drop)
 
-                        if hidden_states.is_cuda:
-                            cluster_start_event = torch.cuda.Event(enable_timing=True)
-                            cluster_end_event = torch.cuda.Event(enable_timing=True)
-                            torch.cuda.synchronize()
-                            cluster_start_event.record()
-                        else:
-                            cluster_start_time = time.perf_counter()
-
                         merge_sparse_token = iatr_dpc_cluster_and_merge(
                             merge_token_stage2,          # (1, N_drop, C)
                             merge_token_info,            # (1, N_drop)
                             k=8,
                             score_percentile=0.9         # 可调：0.85 ~ 0.95
                         )
-
-                        if hidden_states.is_cuda:
-                            cluster_end_event.record()
-                            torch.cuda.synchronize()
-                            sample_recycle_cluster_only_time_ms += cluster_start_event.elapsed_time(cluster_end_event)
-                        else:
-                            sample_recycle_cluster_only_time_ms += (time.perf_counter() - cluster_start_time) * 1000.0
-
                         cluster_num = merge_sparse_token.shape[1]
-                        dropped_token_num = merge_token_stage2.shape[1]
-                        sample_recycle_calls += 1
-                        sample_recycle_complexity += float(dropped_token_num * dropped_token_num)
 
                         # cluster_num = int(merge_token_stage2.shape[1] / 10) + 1       
                         # if (cluster_num == 0) :
@@ -377,22 +334,6 @@ class LlamaDynamicvitModel(LlamaModel):
                         v_token_num = pred_score_vis.sum() + cluster_num # B == 1
                         # print(layer_idx, v_token_num)
                         text_token_start = v_token_start + v_token_num
-                        if hidden_states.is_cuda:
-                            recycle_end_event.record()
-                            torch.cuda.synchronize()
-                            sample_recycle_time_ms += recycle_start_event.elapsed_time(recycle_end_event)
-                        else:
-                            sample_recycle_time_ms += (time.perf_counter() - recycle_start_time) * 1000.0
-                    else:
-                        select_token_idx = torch.where(policy == 1)[1].unsqueeze(0)  # B, L_new
-                        layer_outputs = (batch_index_select(layer_outputs[0], select_token_idx), layer_outputs[1])  # B, L, C
-                        position_ids = position_ids[:, :len(select_token_idx[0])]
-                        prev_decision = policy
-                        # update
-                        v_token_num = pred_score_vis.sum() # B == 1
-                        # print(layer_idx, v_token_num)
-                        text_token_start = v_token_start + v_token_num
-                   
 
                 idx_sprase_layer = idx_sprase_layer + 1 
             # Normal Layers
@@ -429,13 +370,10 @@ class LlamaDynamicvitModel(LlamaModel):
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
-                if output_attentions:
-                    all_self_attns += (layer_outputs[1],)
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
 
             num_token.append(v_token_num)
-            if is_last_layer and hidden_states.is_cuda:
-                last_layer_mem_after = torch.cuda.memory_allocated(device=hidden_states.device)
-                sample_last_layer_memory_mb = max(0.0, (last_layer_mem_after - last_layer_mem_before) / (1024 ** 2))
         
         if len(pre_prompt_length_list) != 0 and hidden_states.shape[1] !=1:
             total_end_event.record()
@@ -445,26 +383,7 @@ class LlamaDynamicvitModel(LlamaModel):
             self.num_forward += 1
             self.num_token_pool += (sum(num_token) / self.num_layers)
             FLOPs_avg_sample = (self.all_FLOPs / self.num_forward) * 1e-12
-            avg_sparse_layers_cuda_time_ms = self.total_cuda_time / self.num_forward
-            print(
-                f"equal token num until now: {self.num_token_pool / self.num_forward}, "
-                f"sparse_layers_cuda_time_cur_sample_ms:{total_cuda_time_ms}, "
-                f"sparse_layers_cuda_time_avg_ms:{avg_sparse_layers_cuda_time_ms}, "
-                f"sparse_layers_cuda_time_total_ms:{self.total_cuda_time}, "
-                f"total_layers_cuda_time:{self.total_cuda_time}, "
-                f"TFLOPs_avg_sample:{FLOPs_avg_sample}"
-            )
-            self.last_profile.update({
-                "sparse_layers_cuda_time_ms": float(total_cuda_time_ms),
-                "total_layers_cuda_time_ms": float(self.total_cuda_time),
-                "recycle_time_ms": float(sample_recycle_time_ms),
-                "recycle_cluster_only_time_ms": float(sample_recycle_cluster_only_time_ms),
-                "recycle_complexity": float(sample_recycle_complexity),
-                "recycle_calls": int(sample_recycle_calls),
-                "last_layer_memory_mb": float(sample_last_layer_memory_mb),
-                "last_layer_allocated_memory_mb": float(sample_last_layer_allocated_mb),
-                "last_layer_reserved_memory_mb": float(sample_last_layer_reserved_mb),
-            })
+            print(f"equal token num until now: {self.num_token_pool / self.num_forward} ,total_layers_cuda_time:{self.total_cuda_time},TFLOPs_avg_sample:{FLOPs_avg_sample}")
     
         hidden_states = self.norm(hidden_states)
 
@@ -1063,35 +982,6 @@ class LlamaDynamicvitDecoderLayer(LlamaDecoderLayer):
 class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
     def __init__(self, config):
         super(LlamaForCausalLM,self).__init__(config)
-
-    @staticmethod
-    def _estimate_kv_cache_bytes(past_key_values):
-        if past_key_values is None:
-            return 0
-        total_bytes = 0
-        for layer_kv in past_key_values:
-            if isinstance(layer_kv, (tuple, list)):
-                for tensor in layer_kv:
-                    if torch.is_tensor(tensor):
-                        total_bytes += tensor.numel() * tensor.element_size()
-        return int(total_bytes)
-
-    @staticmethod
-    def _estimate_kv_cache_layer_bytes(past_key_values):
-        if past_key_values is None:
-            return []
-        layer_bytes = []
-        for layer_kv in past_key_values:
-            cur_layer_bytes = 0
-            if isinstance(layer_kv, (tuple, list)):
-                for tensor in layer_kv:
-                    if torch.is_tensor(tensor):
-                        cur_layer_bytes += tensor.numel() * tensor.element_size()
-            elif torch.is_tensor(layer_kv):
-                cur_layer_bytes += layer_kv.numel() * layer_kv.element_size()
-            layer_bytes.append(int(cur_layer_bytes))
-        return layer_bytes
-
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1792,26 +1682,11 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
 
         this_peer_finished = False  # used by synced_gpus only
         self.model.generate_process_count = 0
-        self.model.last_profile = {}
 
-        use_cuda_timing = torch.cuda.is_available() and input_ids.is_cuda
-        if use_cuda_timing:
-            causal_inference_start_event = torch.cuda.Event(enable_timing=True)
-            causal_inference_end_event = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize()
-            causal_inference_start_event.record()
-        else:
-            causal_inference_start_time = time.perf_counter()
-        kv_cache_peak_bytes = 0
-        kv_cache_layer_min_bytes = 0
-        kv_cache_layer_max_bytes = 0
-        kv_cache_layer_avg_bytes = 0.0
-        prefill_cuda_time_ms = 0.0
-        decode_cuda_time_ms = 0.0
-        prefill_peak_memory_bytes = 0
-        decode_peak_memory_bytes = 0
-        decode_step_count = 0
-        generation_step_idx = 0
+        causal_inference_start_event = torch.cuda.Event(enable_timing=True)
+        causal_inference_end_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        causal_inference_start_event.record()
         while True:
             if synced_gpus:
                 # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -1827,14 +1702,6 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # forward pass to get next token
-            if use_cuda_timing:
-                torch.cuda.reset_peak_memory_stats(device=input_ids.device)
-                step_start_event = torch.cuda.Event(enable_timing=True)
-                step_end_event = torch.cuda.Event(enable_timing=True)
-                torch.cuda.synchronize()
-                step_start_event.record()
-            else:
-                step_start_time = time.perf_counter()
             outputs = self(
                 **model_inputs,
                 return_dict=True,
@@ -1846,24 +1713,8 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
                 retained_tokens = retained_tokens,
             )
             outputs = outputs[2]
-            if use_cuda_timing:
-                step_end_event.record()
-                torch.cuda.synchronize()
-                step_cuda_time_ms = step_start_event.elapsed_time(step_end_event)
-                step_peak_memory_bytes = int(torch.cuda.max_memory_allocated(device=input_ids.device))
-            else:
-                step_cuda_time_ms = (time.perf_counter() - step_start_time) * 1000.0
-                step_peak_memory_bytes = 0
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
-            if generation_step_idx == 0:
-                prefill_cuda_time_ms = float(step_cuda_time_ms)
-                prefill_peak_memory_bytes = max(prefill_peak_memory_bytes, step_peak_memory_bytes)
-            else:
-                decode_cuda_time_ms += float(step_cuda_time_ms)
-                decode_peak_memory_bytes = max(decode_peak_memory_bytes, step_peak_memory_bytes)
-                decode_step_count += 1
-            generation_step_idx += 1
 
             next_token_logits = outputs.logits[:, -1, :]
 
@@ -1905,15 +1756,6 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
             )
-            kv_cache_peak_bytes = max(
-                kv_cache_peak_bytes,
-                self._estimate_kv_cache_bytes(model_kwargs.get("past_key_values"))
-            )
-            layer_bytes = self._estimate_kv_cache_layer_bytes(model_kwargs.get("past_key_values"))
-            if layer_bytes:
-                kv_cache_layer_min_bytes = int(min(layer_bytes))
-                kv_cache_layer_max_bytes = int(max(layer_bytes))
-                kv_cache_layer_avg_bytes = float(sum(layer_bytes) / len(layer_bytes))
 
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
@@ -1932,26 +1774,11 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
             if this_peer_finished and not synced_gpus:
                 break
 
-        if use_cuda_timing:
-            causal_inference_end_event.record()
-            torch.cuda.synchronize()
-            causal_inference_cuda_time_ms = causal_inference_start_event.elapsed_time(causal_inference_end_event)
-        else:
-            causal_inference_cuda_time_ms = (time.perf_counter() - causal_inference_start_time) * 1000.0
+        causal_inference_end_event.record()
+        torch.cuda.synchronize()
+
+        causal_inference_cuda_time_ms = causal_inference_start_event.elapsed_time(causal_inference_end_event)
         self.model.causal_inference_cuda_time += causal_inference_cuda_time_ms
-        self.model.last_profile.update({
-            "causal_inference_cuda_time_ms": float(causal_inference_cuda_time_ms),
-            "prefill_cuda_time_ms": float(prefill_cuda_time_ms),
-            "decode_cuda_time_ms": float(decode_cuda_time_ms),
-            "decode_step_count": int(decode_step_count),
-            "kv_cache_peak_bytes": int(kv_cache_peak_bytes),
-            "kv_cache_layer_min_bytes": int(kv_cache_layer_min_bytes),
-            "kv_cache_layer_max_bytes": int(kv_cache_layer_max_bytes),
-            "kv_cache_layer_avg_bytes": float(kv_cache_layer_avg_bytes),
-            "prefill_peak_memory_bytes": int(prefill_peak_memory_bytes),
-            "decode_peak_memory_bytes": int(decode_peak_memory_bytes),
-        })
-        self.model.profile_history.append(dict(self.model.last_profile))
         # FLOPs_avg = all_FLOPs /self.num_layers
         # print(f"total_causal_inference_cuda_time:{self.model.causal_inference_cuda_time}")
         if streamer is not None:

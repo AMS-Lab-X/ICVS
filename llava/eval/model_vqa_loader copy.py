@@ -1,4 +1,6 @@
 # ============================================
+# 文件2: llava/eval/model_vqa_loader.py (修改版)
+# 集成分类器并传递任务ID
 # ============================================
 
 import argparse
@@ -6,8 +8,6 @@ import torch
 import os
 import json
 import time
-import sys
-import contextlib
 from tqdm import tqdm
 import shortuuid
 
@@ -21,25 +21,13 @@ import logging
 import datetime
 from PIL import Image
 import math
-import statistics
 
-
-class Tee:
-    """Write stdout/stderr to both console and a log file."""
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-            s.flush()
-        return len(data)
-
-    def flush(self):
-        for s in self.streams:
-            s.flush()
+# 🔥 导入可视化工具
 from llava.visualization import PruningMaskVisualizer
+
+# 🔥 导入分类器
 from llava.classifier import PromptTaskClassifier, CATEGORY_MAPPING, ID_TO_CATEGORY
+
 
 
 def split_list(lst, n):
@@ -50,36 +38,6 @@ def split_list(lst, n):
 def get_chunk(lst, n, k):
     chunks = split_list(lst, n)
     return chunks[k]
-
-def summarize_min_max_avg(values):
-    if not values:
-        return {"min": 0.0, "max": 0.0, "avg": 0.0}
-    return {
-        "min": float(min(values)),
-        "max": float(max(values)),
-        "avg": float(statistics.mean(values)),
-    }
-
-def summarize_max_avg(values):
-    if not values:
-        return {"max": 0.0, "avg": 0.0}
-    return {
-        "max": float(max(values)),
-        "avg": float(statistics.mean(values)),
-    }
-
-def bytes_to_mb(num_bytes):
-    return float(num_bytes) / (1024 ** 2)
-
-def estimate_model_gpu_memory_bytes(model):
-    total_bytes = 0
-    for param in model.parameters():
-        if param.device.type == "cuda":
-            total_bytes += param.numel() * param.element_size()
-    for buffer in model.buffers():
-        if buffer.device.type == "cuda":
-            total_bytes += buffer.numel() * buffer.element_size()
-    return int(total_bytes)
 
 
 class CustomDataset(Dataset):
@@ -94,7 +52,7 @@ class CustomDataset(Dataset):
         line = self.questions[index]
         image_file = line["image"]
         qs = line["text"]
-
+        
         if self.model_config.mm_use_im_start_end:
             qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
         else:
@@ -130,12 +88,13 @@ def create_data_loader(questions, image_folder, tokenizer, image_processor, mode
 
 
 def eval_model(args):
-    # Load model and optional prompt classifier, then run VQA evaluation.
+    # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
+    # 🔥 初始化分类器
     classifier = None
     if args.classifier_path:
         print(f"\n{'='*80}")
@@ -145,11 +104,11 @@ def eval_model(args):
                 model_path=args.classifier_path,
                 num_classes=14
             )
-            print("Classifier loaded successfully!")
+            print("✓ Classifier loaded successfully!")
             print(f"  Will use task-specific attention heads for better performance")
             print(f"{'='*80}\n")
         except Exception as e:
-            print(f"Failed to load classifier: {e}")
+            print(f"✗ Failed to load classifier: {e}")
             print(f"  Will use default attention head")
             print(f"{'='*80}\n")
             classifier = None
@@ -165,112 +124,127 @@ def eval_model(args):
         print(f'Auto switching to {args.conv_mode}.')
 
     data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor, model.config)
-
+    
+    # 🔥 获取模型所在的设备
     if hasattr(model, 'device'):
         device = model.device
     else:
         device = next(model.parameters()).device
     print(f"Model device: {device}")
-
+    
+    # 🔥 确保分类器使用相同的设备
     if classifier is not None:
         classifier.device = device
         classifier.model.to(device)
         print(f"Classifier moved to device: {device}")
-    model_gpu_memory_bytes = estimate_model_gpu_memory_bytes(model)
-
+    
+    # 🔥 统计信息
     classification_stats = {
         'total': 0,
         'correct': 0,
         'by_category': {cat: {'total': 0, 'correct': 0} for cat in ID_TO_CATEGORY.values()}
     }
-
-    total_inference_times = []
-    profile_samples = []
-    classifier_stats = None
+    
+    # 🔥 推理时间统计
+    total_inference_times = []  # 记录每次完整推理的时间（毫秒）
+    classifier_stats = None  # 分类器统计信息
+    
+    # 🔥 初始化可视化器（如果需要可视化）
+    visualizer = None
     if args.visualize_pruning:
         visualizer = PruningMaskVisualizer(
-            image_size=336,
+            image_size=336,  # 根据实际情况调整
             patch_size=14,
             num_patches_per_side=24,  # 576 = 24*24
         )
         os.makedirs(args.visualization_output_dir, exist_ok=True)
         print(f"Pruning visualization enabled. Output directory: {args.visualization_output_dir}")
+    
 
-
+    
     retained_tokens = args.retained_tokens
-    print(f"[Eval] runtime retained_tokens={retained_tokens}")
-
+    
+    # 🔥 为每个样本生成唯一的ID（使用行号，因为同一个图像可能有多个不同的文本prompt）
     for sample_idx, ((input_ids, image_tensor, image_sizes), line) in enumerate(tqdm(zip(data_loader, questions), total=len(questions))):
         idx = line["question_id"]
+        # 🔥 清理idx：移除路径分隔符和扩展名，确保文件名安全
         idx_clean = str(idx).replace("/", "_").replace("\\", "_")
         if idx_clean.endswith(('.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG')):
-            idx_clean = idx_clean.rsplit('.', 1)[0]
+            idx_clean = idx_clean.rsplit('.', 1)[0]  # 移除扩展名
         cur_prompt = line["text"]
         true_category = line.get("category", "Unknown")
-
+        
+        # 🔥 生成唯一的样本ID：使用行号（sample_idx）确保每个样本都有唯一标识
+        # 格式：sample_{行号}_{清理后的question_id}，例如：sample_0_code_reasoning_0020
         unique_sample_id = f"sample_{sample_idx:05d}_{idx_clean}"
-
-
+        
+        
+        # 🔥 开始计时整个推理过程（包括分类器和模型生成）
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         total_start_time = time.time()
-
+        
+        # 🔥 使用分类器预测任务类型
         predicted_task_id = None
         predicted_category = None
         confidence = 0.0
-
+        
         if classifier is not None:
             try:
                 predicted_task_id, confidence, predicted_category, _ = classifier.predict(cur_prompt, enable_timing=True)
-
+                
+                # 统计分类准确率
+                classification_stats['total'] += 1
                 if predicted_category == true_category:
                     classification_stats['correct'] += 1
-
+                
                 if true_category in classification_stats['by_category']:
                     classification_stats['by_category'][true_category]['total'] += 1
                     if predicted_category == true_category:
                         classification_stats['by_category'][true_category]['correct'] += 1
-
+                
             except Exception as e:
                 print(f"Classifier error for question {idx}: {e}")
-
+        
         input_ids = input_ids.to(device=device, non_blocking=True)
-
+        
+        # 🔥 加载原始图像用于可视化
+        original_image = None
         if args.visualize_pruning:
             image_file = line["image"]
             image_path = os.path.join(args.image_folder, image_file)
             original_image = Image.open(image_path).convert('RGB')
-
+        
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
                 images=image_tensor.to(dtype=torch.float16, device=device, non_blocking=True),
                 image_sizes=image_sizes,
                 retained_tokens=retained_tokens,
-                task_id=predicted_task_id,
+                task_id=predicted_task_id,  # 🔥 传递任务ID到模型
+                collect_pruning_masks=args.visualize_pruning,  # 🔥 启用掩码收集
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True)
-            sample_profile = {}
-            if hasattr(model, "model") and hasattr(model.model, "last_profile"):
-                sample_profile = dict(model.model.last_profile)
-            if sample_profile:
-                profile_samples.append(sample_profile)
-
+            
+            # 🔥 可视化剪枝掩码（只显示Layer 2）
+            if args.visualize_pruning and original_image is not None:
                 pruning_masks = model.model.pruning_masks
                 pruning_masks_info = model.model.pruning_masks_info
+                # 只可视化Layer 2的mask
                 layer_2_mask = pruning_masks.get(2)
                 if layer_2_mask is not None:
                     layer_2_info = pruning_masks_info.get(2, {})
                     topk_retained = layer_2_info.get('topk_retained')
                     image_shape = layer_2_info.get('image_shape', 576)
-
+                    
+                    # 🔥 为当前样本创建子文件夹（与FFT可视化保持一致）
                     sample_output_dir = os.path.join(args.visualization_output_dir, unique_sample_id)
                     os.makedirs(sample_output_dir, exist_ok=True)
-
+                    
                     vis_image = visualizer.visualize_layer2(
                         original_image,
                         layer_2_mask,
@@ -281,18 +255,21 @@ def eval_model(args):
                         topk_retained=topk_retained,
                         original_image_shape=image_shape
                     )
-
+                    
+                    # 重置掩码收集
                     model.model.collect_pruning_masks = False
                     model.model.pruning_masks = {}
                     model.model.pruning_masks_info = {}
+        
 
-
+        
+        # 🔥 结束计时整个推理过程
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         total_end_time = time.time()
         total_inference_time_ms = (total_end_time - total_start_time) * 1000.0
         total_inference_times.append(total_inference_time_ms)
-
+        
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
         ans_id = shortuuid.uuid()
@@ -307,17 +284,18 @@ def eval_model(args):
                 "predicted_category": predicted_category,
                 "predicted_task_id": predicted_task_id,
                 "classification_confidence": confidence,
-                "profile": sample_profile if sample_profile else None,
             }
         }
-
+        
         ans_file.write(json.dumps(result) + "\n")
-
+    
     ans_file.close()
-
+    
+    # 🔥 获取分类器统计信息
     if classifier is not None:
         classifier_stats = classifier.get_stats()
-
+    
+    # 🔥 计算整体推理统计信息
     overall_inference_stats = {
         'num_samples': len(total_inference_times),
         'total_time_ms': sum(total_inference_times),
@@ -325,204 +303,73 @@ def eval_model(args):
         'min_time_ms': min(total_inference_times) if total_inference_times else 0.0,
         'max_time_ms': max(total_inference_times) if total_inference_times else 0.0,
     }
-
-    latency_stats = {
-        "end_to_end_time_ms": {
-            "min": float(overall_inference_stats["min_time_ms"]),
-            "max": float(overall_inference_stats["max_time_ms"]),
-            "avg": float(overall_inference_stats["avg_time_ms"]),
-        }
-    }
-    memory_stats = {
-        "model_gpu_memory_mb": {
-            "max": bytes_to_mb(model_gpu_memory_bytes),
-            "avg": bytes_to_mb(model_gpu_memory_bytes),
-        }
-    }
-    complexity_stats = {}
-    profile_stats = {}
-    if profile_samples:
-        prefill_times = [float(x.get("prefill_cuda_time_ms", 0.0)) for x in profile_samples]
-        decode_times = [float(x.get("decode_cuda_time_ms", 0.0)) for x in profile_samples]
-        total_cuda_times = [float(x.get("causal_inference_cuda_time_ms", 0.0)) for x in profile_samples]
-        recycle_times = [float(x.get("recycle_time_ms", 0.0)) for x in profile_samples if "recycle_time_ms" in x]
-        recycle_cluster_only_times = [float(x.get("recycle_cluster_only_time_ms", 0.0)) for x in profile_samples if "recycle_cluster_only_time_ms" in x]
-        recycle_complexity = [float(x.get("recycle_complexity", 0.0)) for x in profile_samples if "recycle_complexity" in x]
-        kv_cache_peak_bytes = [int(x.get("kv_cache_peak_bytes", 0)) for x in profile_samples if "kv_cache_peak_bytes" in x]
-        prefill_peak_memory_bytes = [int(x.get("prefill_peak_memory_bytes", 0)) for x in profile_samples if "prefill_peak_memory_bytes" in x]
-        decode_peak_memory_bytes = [int(x.get("decode_peak_memory_bytes", 0)) for x in profile_samples if "decode_peak_memory_bytes" in x]
-
-        latency_stats["prefill_time_ms"] = summarize_min_max_avg(prefill_times)
-        latency_stats["decode_time_ms"] = summarize_min_max_avg(decode_times)
-        latency_stats["cuda_time_ms"] = summarize_min_max_avg(total_cuda_times)
-        latency_stats["recycle_time_ms"] = summarize_min_max_avg(recycle_times)
-        latency_stats["recycle_cluster_only_time_ms"] = summarize_min_max_avg(recycle_cluster_only_times)
-
-        kv_cache_peak_mb = [bytes_to_mb(x) for x in kv_cache_peak_bytes]
-        prefill_peak_memory_mb = [bytes_to_mb(x) for x in prefill_peak_memory_bytes]
-        decode_peak_memory_mb = [bytes_to_mb(x) for x in decode_peak_memory_bytes]
-        memory_stats["kv_cache_gpu_memory_mb"] = summarize_max_avg(kv_cache_peak_mb)
-        memory_stats["prefill_gpu_memory_mb"] = summarize_max_avg(prefill_peak_memory_mb)
-        memory_stats["decode_gpu_memory_mb"] = summarize_max_avg(decode_peak_memory_mb)
-
-        complexity_stats["recycle_mechanism_complexity"] = summarize_min_max_avg(recycle_complexity)
-
-        profile_stats = {
-            "num_profile_samples": len(profile_samples),
-            "latency": latency_stats,
-            "memory": memory_stats,
-            "complexity": complexity_stats,
-        }
-
-    if classifier_stats is not None:
-        latency_stats["classifier_time_ms"] = {
-            "total": float(classifier_stats["total_time_ms"]),
-            "avg": float(classifier_stats["avg_time_ms"]),
-        }
-        if overall_inference_stats["total_time_ms"] > 0:
-            latency_stats["classifier_overhead_ratio_pct"] = float(
-                (classifier_stats["total_time_ms"] / overall_inference_stats["total_time_ms"]) * 100.0
-            )
-        complexity_stats["classifier_complexity_gflops"] = {
-            "total": float(classifier_stats["total_flops_g"]),
-            "avg": float(classifier_stats["avg_flops_g"]),
-        }
-
+    
+    # 🔥 打印统计结果
     print(f"\n{'='*80}")
     print("INFERENCE STATISTICS")
     print(f"{'='*80}")
-
-    print("\n[Latency Statistics]")
+    print(f"\n【Overall Inference (including classifier)】")
     print(f"  Total samples: {overall_inference_stats['num_samples']}")
-    print(
-        f"  End-to-end time (ms) min/max/avg: "
-        f"{latency_stats['end_to_end_time_ms']['min']:.2f} / "
-        f"{latency_stats['end_to_end_time_ms']['max']:.2f} / "
-        f"{latency_stats['end_to_end_time_ms']['avg']:.2f}"
-    )
-    if "classifier_time_ms" in latency_stats:
-        print(
-            f"  Classifier time (ms) total/avg: "
-            f"{latency_stats['classifier_time_ms']['total']:.2f} / "
-            f"{latency_stats['classifier_time_ms']['avg']:.2f}"
-        )
-    if "classifier_overhead_ratio_pct" in latency_stats:
-        print(f"  Classifier overhead ratio: {latency_stats['classifier_overhead_ratio_pct']:.2f}%")
-    if "prefill_time_ms" in latency_stats:
-        print(
-            f"  Prefill time (ms) min/max/avg: "
-            f"{latency_stats['prefill_time_ms']['min']:.2f} / "
-            f"{latency_stats['prefill_time_ms']['max']:.2f} / "
-            f"{latency_stats['prefill_time_ms']['avg']:.2f}"
-        )
-    if "decode_time_ms" in latency_stats:
-        print(
-            f"  Decode time (ms) min/max/avg: "
-            f"{latency_stats['decode_time_ms']['min']:.2f} / "
-            f"{latency_stats['decode_time_ms']['max']:.2f} / "
-            f"{latency_stats['decode_time_ms']['avg']:.2f}"
-        )
-    if "cuda_time_ms" in latency_stats:
-        print(
-            f"  CUDA time (ms) min/max/avg: "
-            f"{latency_stats['cuda_time_ms']['min']:.2f} / "
-            f"{latency_stats['cuda_time_ms']['max']:.2f} / "
-            f"{latency_stats['cuda_time_ms']['avg']:.2f}"
-        )
-    if "recycle_time_ms" in latency_stats:
-        print(
-            f"  Recycle time (ms) min/max/avg: "
-            f"{latency_stats['recycle_time_ms']['min']:.2f} / "
-            f"{latency_stats['recycle_time_ms']['max']:.2f} / "
-            f"{latency_stats['recycle_time_ms']['avg']:.2f}"
-        )
-    if "recycle_cluster_only_time_ms" in latency_stats:
-        print(
-            f"  Recycle cluster-only time (ms) min/max/avg: "
-            f"{latency_stats['recycle_cluster_only_time_ms']['min']:.2f} / "
-            f"{latency_stats['recycle_cluster_only_time_ms']['max']:.2f} / "
-            f"{latency_stats['recycle_cluster_only_time_ms']['avg']:.2f}"
-        )
-
-    print("\n[GPU Memory Statistics]")
-    print(
-        f"  Model GPU memory (MB) max/avg: "
-        f"{memory_stats['model_gpu_memory_mb']['max']:.2f} / "
-        f"{memory_stats['model_gpu_memory_mb']['avg']:.2f}"
-    )
-    if "kv_cache_gpu_memory_mb" in memory_stats:
-        print(
-            f"  KV cache GPU memory (MB) max/avg: "
-            f"{memory_stats['kv_cache_gpu_memory_mb']['max']:.2f} / "
-            f"{memory_stats['kv_cache_gpu_memory_mb']['avg']:.2f}"
-        )
-    if "prefill_gpu_memory_mb" in memory_stats:
-        print(
-            f"  Prefill GPU memory (MB) max/avg: "
-            f"{memory_stats['prefill_gpu_memory_mb']['max']:.2f} / "
-            f"{memory_stats['prefill_gpu_memory_mb']['avg']:.2f}"
-        )
-    if "decode_gpu_memory_mb" in memory_stats:
-        print(
-            f"  Decode GPU memory (MB) max/avg: "
-            f"{memory_stats['decode_gpu_memory_mb']['max']:.2f} / "
-            f"{memory_stats['decode_gpu_memory_mb']['avg']:.2f}"
-        )
-
-    print("\n[Computational Complexity Statistics]")
-    if "classifier_complexity_gflops" in complexity_stats:
-        print(
-            f"  Classifier complexity (GFLOPs) total/avg: "
-            f"{complexity_stats['classifier_complexity_gflops']['total']:.4f} / "
-            f"{complexity_stats['classifier_complexity_gflops']['avg']:.6f}"
-        )
-    if "recycle_mechanism_complexity" in complexity_stats:
-        print(
-            f"  Recycle mechanism complexity min/max/avg: "
-            f"{complexity_stats['recycle_mechanism_complexity']['min']:.2f} / "
-            f"{complexity_stats['recycle_mechanism_complexity']['max']:.2f} / "
-            f"{complexity_stats['recycle_mechanism_complexity']['avg']:.2f}"
-        )
-
+    print(f"  Total time: {overall_inference_stats['total_time_ms']:.2f} ms")
+    print(f"  Average time: {overall_inference_stats['avg_time_ms']:.2f} ms")
+    print(f"  Min time: {overall_inference_stats['min_time_ms']:.2f} ms")
+    print(f"  Max time: {overall_inference_stats['max_time_ms']:.2f} ms")
+    
+    if classifier_stats is not None:
+        print(f"\n【Classifier Statistics】")
+        print(f"  Total predictions: {classifier_stats['num_predictions']}")
+        print(f"  Total time: {classifier_stats['total_time_ms']:.2f} ms")
+        print(f"  Average time: {classifier_stats['avg_time_ms']:.2f} ms")
+        print(f"  Total FLOPs: {classifier_stats['total_flops_g']:.4f} GFLOPs")
+        print(f"  Average FLOPs: {classifier_stats['avg_flops_g']:.6f} GFLOPs")
+        
+        # 计算分类器占整体推理的比例
+        if overall_inference_stats['total_time_ms'] > 0:
+            classifier_overhead_ratio = (classifier_stats['total_time_ms'] / overall_inference_stats['total_time_ms']) * 100.0
+            print(f"  Overhead ratio: {classifier_overhead_ratio:.2f}%")
+        
+        # 计算模型生成时间（整体时间 - 分类器时间）
+        model_generation_time = overall_inference_stats['total_time_ms'] - classifier_stats['total_time_ms']
+        avg_model_time = model_generation_time / overall_inference_stats['num_samples'] if overall_inference_stats['num_samples'] > 0 else 0.0
+        print(f"\n【Model Generation (excluding classifier)】")
+        print(f"  Total time: {model_generation_time:.2f} ms")
+        print(f"  Average time: {avg_model_time:.2f} ms")
+    
     if classifier is not None and classification_stats['total'] > 0:
         print(f"\n{'='*80}")
         print("CLASSIFICATION STATISTICS")
         print(f"{'='*80}")
-
+        
         overall_acc = 100 * classification_stats['correct'] / classification_stats['total']
         print(f"Overall Accuracy: {overall_acc:.2f}% ({classification_stats['correct']}/{classification_stats['total']})")
         print(f"\nPer-Category Accuracy:")
         print(f"{'Category':<30} {'Correct':<10} {'Total':<10} {'Accuracy':<10}")
         print(f"{'-'*60}")
-
+        
         for cat_name in sorted(classification_stats['by_category'].keys()):
             stats = classification_stats['by_category'][cat_name]
             if stats['total'] > 0:
                 acc = 100 * stats['correct'] / stats['total']
                 print(f"{cat_name:<30} {stats['correct']:<10} {stats['total']:<10} {acc:.2f}%")
-
+        
         print(f"{'='*80}\n")
-
+        
         stats_file = answers_file.replace('.jsonl', '_classification_stats.json')
         with open(stats_file, 'w') as f:
             json.dump(classification_stats, f, indent=2)
         print(f"Classification statistics saved to: {stats_file}")
-
+    
+    # 🔥 保存推理统计信息
     inference_stats_file = answers_file.replace('.jsonl', '_inference_stats.json')
     inference_stats_output = {
         'overall_inference': overall_inference_stats,
-        'latency_statistics': latency_stats,
-        'gpu_memory_statistics': memory_stats,
-        'computational_complexity_statistics': complexity_stats,
     }
     if classifier_stats is not None:
         inference_stats_output['classifier'] = classifier_stats
         if overall_inference_stats['total_time_ms'] > 0:
             inference_stats_output['classifier_overhead_ratio'] = (classifier_stats['total_time_ms'] / overall_inference_stats['total_time_ms']) * 100.0
             inference_stats_output['model_generation_time_ms'] = overall_inference_stats['total_time_ms'] - classifier_stats['total_time_ms']
-    if profile_stats:
-        inference_stats_output['model_profile'] = profile_stats
-
+    
     with open(inference_stats_file, 'w') as f:
         json.dump(inference_stats_output, f, indent=2)
     print(f"Inference statistics saved to: {inference_stats_file}")
@@ -544,27 +391,17 @@ if __name__ == "__main__":
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--retained_tokens", type=int, default=192)
-
+    
+    # 🔥 分类器参数
     parser.add_argument("--classifier-path", type=str, default=None,
                         help="Path to the trained classifier model")
-
+    
+    # 🔥 可视化参数
     parser.add_argument("--visualize-pruning", action="store_true",
                         help="Enable pruning mask visualization")
     parser.add_argument("--visualization-output-dir", type=str, 
                         default="./playground/data/eval/MME/visualizations",
                         help="Directory to save visualization results")
-    parser.add_argument("--log-file", type=str, default=None,
-                        help="Path to save test run logs. Default: <answers_file>_run.log")
-
+    
     args = parser.parse_args()
-    answers_file = os.path.expanduser(args.answers_file)
-    default_log_file = answers_file.replace('.jsonl', '_run.log')
-    log_file = os.path.expanduser(args.log_file) if args.log_file else default_log_file
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-
-    with open(log_file, "w", encoding="utf-8") as log_f:
-        tee_out = Tee(sys.stdout, log_f)
-        tee_err = Tee(sys.stderr, log_f)
-        with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
-            print(f"Log file: {log_file}")
-            eval_model(args)
+    eval_model(args)
