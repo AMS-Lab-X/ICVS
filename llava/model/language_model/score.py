@@ -39,22 +39,40 @@ TASK_LABELS = [
 label2id = {label: i for i, label in enumerate(TASK_LABELS)}
 NUM_TASK = len(TASK_LABELS)
 
+# # 🔥 任务到最优头的映射
+# TASK_TO_HEAD_MAP = {
+#     label2id["existence"]: 23,  #23 18 24 26 3 9 13 28 
+#     label2id["count"]: 23, 
+#     label2id["position"]: 22,
+#     label2id["color"]: 23,    #26 3 9 22 23
+#     label2id["posters"]: 2,
+#     label2id["celebrity"]: 12,
+#     label2id["scene"]: 31,
+#     label2id["landmark"]: 5,
+#     label2id["artwork"]: 5,
+#     label2id["OCR"]: 28,
+#     label2id["commonsense_reasoning"]: 19,
+#     label2id["numerical_calculation"]: 5,
+#     label2id["text_translation"]: 18,
+#     label2id["code_reasoning"]: 25,
+# }
+
 # 🔥 任务到最优头的映射
 TASK_TO_HEAD_MAP = {
-    label2id["existence"]: 23,  #23 18 24 26 3 9 13 28 
-    label2id["count"]: 23, 
+    label2id["existence"]: 3, 
+    label2id["count"]: 8, 
     label2id["position"]: 22,
     label2id["color"]: 23,    #26 3 9 22 23
     label2id["posters"]: 2,
     label2id["celebrity"]: 12,
     label2id["scene"]: 31,
-    label2id["landmark"]: 5,
-    label2id["artwork"]: 5,
-    label2id["OCR"]: 28,
-    label2id["commonsense_reasoning"]: 19,
-    label2id["numerical_calculation"]: 5,
-    label2id["text_translation"]: 18,
-    label2id["code_reasoning"]: 25,
+    label2id["landmark"]: 0,
+    label2id["artwork"]: 7,
+    label2id["OCR"]: 1,
+    label2id["commonsense_reasoning"]: 20,
+    label2id["numerical_calculation"]: 28,
+    label2id["text_translation"]: 31,
+    label2id["code_reasoning"]: 22,
 }
 
 # # 🔥 默认头（如果任务ID不在映射中）
@@ -79,7 +97,6 @@ def attn_postprocess_topk(self_attn_weights, v_token_start, v_token_num,
             HEAD_ID = TASK_TO_HEAD_MAP[task_id]
             print(f"[Score] Using task-specific head: Task={TASK_LABELS[task_id]}, Head={HEAD_ID}")
             self_attn_weights = self_attn_weights[:, HEAD_ID]
-            # self_attn_weights = self_attn_weights.mean(1)
         else:
             # 如果没有提供task_id或task_id不在映射中，使用平均注意力
             if task_id is not None:
