@@ -1,4 +1,5 @@
-# ============================================
+
+    # ============================================
 # 文件1: llava/model/language_model/score.py (修改版)
 # 关键修改：支持任务自适应的头选择 + FFT 频谱分析
 # ============================================
@@ -39,6 +40,7 @@ TASK_LABELS = [
 label2id = {label: i for i, label in enumerate(TASK_LABELS)}
 NUM_TASK = len(TASK_LABELS)
 
+
 # # 🔥 任务到最优头的映射
 # TASK_TO_HEAD_MAP = {
 #     label2id["existence"]: 23,  #23 18 24 26 3 9 13 28 
@@ -56,6 +58,7 @@ NUM_TASK = len(TASK_LABELS)
 #     label2id["text_translation"]: 18,
 #     label2id["code_reasoning"]: 25,
 # }
+
 
 # 🔥 任务到最优头的映射
 TASK_TO_HEAD_MAP = {
@@ -81,6 +84,74 @@ TASK_TO_HEAD_MAP = {
 
 
 
+def _get_first_pruning_layer_head_override(num_heads):
+    head_id = os.environ.get("SPARSEVLM_FIRST_LAYER_HEAD_ID")
+    if head_id is None:
+        head_id = os.environ.get("HEAD_ID")
+    if head_id is None or head_id == "":
+        return None
+
+    try:
+        head_id = int(head_id)
+    except ValueError:
+        print(f"[Score] Ignore invalid head override: {head_id}")
+        return None
+
+    if not 0 <= head_id < num_heads:
+        print(f"[Score] Ignore out-of-range head override: {head_id}, num_heads={num_heads}")
+        return None
+
+    return head_id
+
+
+def _get_task_head_weights(task_id, num_heads):
+    if task_id is None:
+        return []
+
+    if isinstance(task_id, dict):
+        task_items = task_id.items()
+    elif isinstance(task_id, (list, tuple, set)):
+        task_items = [(single_task_id, 1.0) for single_task_id in task_id]
+    else:
+        task_items = [(task_id, 1.0)]
+
+    head_weights = {}
+    for single_task_id, weight in task_items:
+        try:
+            single_task_id = int(single_task_id)
+            weight = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0 or single_task_id not in TASK_TO_HEAD_MAP:
+            continue
+
+        head_id = TASK_TO_HEAD_MAP[single_task_id]
+        if not 0 <= head_id < num_heads:
+            continue
+        head_weights[head_id] = head_weights.get(head_id, 0.0) + weight
+
+    return [(head_id, weight) for head_id, weight in head_weights.items()]
+
+
+def _format_task_route(task_id):
+    if isinstance(task_id, dict):
+        task_ids = task_id.keys()
+    elif isinstance(task_id, (list, tuple, set)):
+        task_ids = task_id
+    else:
+        task_ids = [task_id]
+
+    names = []
+    for single_task_id in task_ids:
+        try:
+            single_task_id = int(single_task_id)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= single_task_id < len(TASK_LABELS):
+            names.append(TASK_LABELS[single_task_id])
+    return names
+
+
 def attn_postprocess_topk(self_attn_weights, v_token_start, v_token_num, 
                           text_token_start, t_token_idx, layer_idx, 
                           retained_tokens, task_id=None):
@@ -92,11 +163,22 @@ def attn_postprocess_topk(self_attn_weights, v_token_start, v_token_num,
     
     # 🔥 原有的注意力头选择逻辑
     if layer_idx == 2:
-        # 🔥 核心修改：根据任务ID动态选择头
-        if task_id is not None and task_id in TASK_TO_HEAD_MAP:
-            HEAD_ID = TASK_TO_HEAD_MAP[task_id]
-            print(f"[Score] Using task-specific head: Task={TASK_LABELS[task_id]}, Head={HEAD_ID}")
-            self_attn_weights = self_attn_weights[:, HEAD_ID]
+        head_override = _get_first_pruning_layer_head_override(H)
+        if head_override is not None:
+            print(f"[Score] Using fixed first-pruning-layer head: Head={head_override}")
+            self_attn_weights = self_attn_weights[:, head_override]
+        elif _get_task_head_weights(task_id, H):
+            head_weights = _get_task_head_weights(task_id, H)
+            head_ids = [head_id for head_id, _ in head_weights]
+            weights = torch.tensor(
+                [weight for _, weight in head_weights],
+                dtype=self_attn_weights.dtype,
+                device=self_attn_weights.device,
+            )
+            weights = weights / weights.sum().clamp_min(1e-6)
+            print(f"[Score] Using task-specific heads: Tasks={_format_task_route(task_id)}, Heads={head_ids}")
+            self_attn_weights = (self_attn_weights[:, head_ids] * weights.view(1, -1, 1, 1)).sum(1)
+            # self_attn_weights = self_attn_weights.mean(1)
         else:
             # 如果没有提供task_id或task_id不在映射中，使用平均注意力
             if task_id is not None:

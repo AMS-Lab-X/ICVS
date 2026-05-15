@@ -340,7 +340,7 @@ class LlamaDynamicvitModel(LlamaModel):
                             merge_token_stage2,          # (1, N_drop, C)
                             merge_token_info,            # (1, N_drop)
                             k=8,
-                            score_percentile=0.9         # 可调：0.85 ~ 0.95
+                            score_percentile=0.8         # 可调：0.85 ~ 0.95
                         )
 
                         if hidden_states.is_cuda:

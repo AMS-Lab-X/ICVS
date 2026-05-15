@@ -2,6 +2,7 @@
 from .prompt_classifier import (
     PromptClassifier, 
     PromptTaskClassifier,
+    PromptTaskClassifierV2,
     CATEGORY_MAPPING,
     ID_TO_CATEGORY
 )
@@ -9,6 +10,7 @@ from .prompt_classifier import (
 __all__ = [
     'PromptClassifier', 
     'PromptTaskClassifier',
+    'PromptTaskClassifierV2',
     'CATEGORY_MAPPING',
     'ID_TO_CATEGORY'
 ]

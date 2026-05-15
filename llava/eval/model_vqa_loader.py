@@ -39,7 +39,7 @@ class Tee:
         for s in self.streams:
             s.flush()
 from llava.visualization import PruningMaskVisualizer
-from llava.classifier import PromptTaskClassifier, CATEGORY_MAPPING, ID_TO_CATEGORY
+from llava.classifier import PromptTaskClassifier, PromptTaskClassifierV2, CATEGORY_MAPPING, ID_TO_CATEGORY
 
 
 def split_list(lst, n):
@@ -141,12 +141,27 @@ def eval_model(args):
         print(f"\n{'='*80}")
         print(f"Loading prompt classifier from {args.classifier_path}")
         try:
-            classifier = PromptTaskClassifier(
-                model_path=args.classifier_path,
-                num_classes=14
-            )
+            classifier_cls = PromptTaskClassifierV2 if args.classifier_version == "v2" else PromptTaskClassifier
+            classifier_kwargs = {
+                "model_path": args.classifier_path,
+                "num_classes": 14,
+            }
+            if args.classifier_version == "v2":
+                classifier_kwargs.update({
+                    "min_confidence": args.classifier_min_confidence,
+                    "max_tasks": args.classifier_max_tasks,
+                    "fallback_to_top1": not args.classifier_no_fallback,
+                })
+            classifier = classifier_cls(**classifier_kwargs)
             print("Classifier loaded successfully!")
-            print(f"  Will use task-specific attention heads for better performance")
+            if args.classifier_version == "v2":
+                print(
+                    "  Will use classifier v2.0 multi-task routing "
+                    f"(min_confidence={args.classifier_min_confidence}, "
+                    f"max_tasks={args.classifier_max_tasks})"
+                )
+            else:
+                print(f"  Will use task-specific attention heads for better performance")
             print(f"{'='*80}\n")
         except Exception as e:
             print(f"Failed to load classifier: {e}")
@@ -223,12 +238,14 @@ def eval_model(args):
             try:
                 predicted_task_id, confidence, predicted_category, _ = classifier.predict(cur_prompt, enable_timing=True)
 
-                if predicted_category == true_category:
+                predicted_categories = predicted_category if isinstance(predicted_category, list) else [predicted_category]
+                classification_stats['total'] += 1
+                if true_category in predicted_categories:
                     classification_stats['correct'] += 1
 
                 if true_category in classification_stats['by_category']:
                     classification_stats['by_category'][true_category]['total'] += 1
-                    if predicted_category == true_category:
+                    if true_category in predicted_categories:
                         classification_stats['by_category'][true_category]['correct'] += 1
 
             except Exception as e:
@@ -547,6 +564,14 @@ if __name__ == "__main__":
 
     parser.add_argument("--classifier-path", type=str, default=None,
                         help="Path to the trained classifier model")
+    parser.add_argument("--classifier-version", type=str, default="v1", choices=["v1", "v2"],
+                        help="Use v1 single-task classifier or v2 threshold-based multi-task router")
+    parser.add_argument("--classifier-min-confidence", type=float, default=0.20,
+                        help="V2: minimum softmax confidence required for a task route")
+    parser.add_argument("--classifier-max-tasks", type=int, default=None,
+                        help="V2: optional maximum number of task routes; does not force exactly this many")
+    parser.add_argument("--classifier-no-fallback", action="store_true",
+                        help="V2: disable fallback to top-1 when no task reaches the confidence threshold")
 
     parser.add_argument("--visualize-pruning", action="store_true",
                         help="Enable pruning mask visualization")
