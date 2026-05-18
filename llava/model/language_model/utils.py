@@ -310,13 +310,30 @@ def cluster_and_merge(x, cluster_num):
     
     return x_merged
 
-def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9):
+def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9, max_recycle_tokens=5):
     """
     x: (B, N, C) dropped visual tokens
     info_score: (B, N) information score per token
     """
 
     B, N, C = x.shape
+    
+    # no discarded tokens
+    if N == 0:
+        return x[:, :0, :]
+
+    # only one discarded token
+    if N == 1:
+        return x
+
+    # avoid topk out-of-range
+    k = min(k, N)
+
+    # avoid recycle number overflow
+    if max_recycle_tokens is not None:
+        max_recycle_tokens = min(max_recycle_tokens, N)
+
+
 
     # ---------- 1. cosine distance高维空间使用语义距离代替欧式距离----------
     x_norm = x / (x.norm(dim=-1, keepdim=True) + 1e-6)
@@ -340,10 +357,21 @@ def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9):
     score = density * delta
 
     # ---------- 5. adaptive center selection ----------
-    thresh = torch.quantile(score.float(), score_percentile, dim=-1, keepdim=True)
-    centers = score >= thresh  # (B, N)
+    # thresh = torch.quantile(score.float(), score_percentile, dim=-1, keepdim=True)
+    # centers = score >= thresh  # (B, N)
 
-    center_idx = torch.where(centers)[1]
+    # center_idx = torch.where(centers)[1]
+
+    recycle_num = max_recycle_tokens
+
+    recycle_num = min(recycle_num, N)
+
+    _, center_idx = torch.topk(score, k=recycle_num, dim=-1)
+    center_idx = center_idx[0]
+
+
+
+
     if center_idx.numel() == 0:
         idx = torch.argmax(info_score[0])
         return x[:, idx:idx+1, :]

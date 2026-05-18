@@ -10,10 +10,14 @@ import torch.nn.functional as F
 import os
 
 layer_dict = {2:0, 6:1, 15:2}
+# layer_dict = {2:0, 10:1, 20:2}
+# layer_dict = {2:0, 14:1, 24:2}
 
 sparse_token_list_192 = [300, 200, 110]
 sparse_token_list_128 = [303, 110, 36]
 sparse_token_list_64 = [66, 30, 17]
+# # sparse_token_list_64 = [50, 20, 17]
+# sparse_token_list_64 = [48, 17, 8]
 sparse_token_list_576 = [576, 576, 576]
 # sparse_token_list_576 = [1, 1, 1]
 sparse_token_list_48 = [30, 10, 7]
@@ -29,6 +33,44 @@ sparse_token_dict = {
     96: sparse_token_list_96,
     288: sparse_token_list_288
 }
+
+
+# recycle_token_list_64 = [4, 3, 1]
+recycle_token_list_64 = [5, 4, 1]
+recycle_token_dict = {
+    64: recycle_token_list_64,
+}
+
+
+# # -----------------修改-----------------------
+# layer_dict = {2:0}
+
+# sparse_token_list_192 = [300, 200, 110]
+# sparse_token_list_128 = [303, 110, 36]
+# sparse_token_list_64 = [25]
+# sparse_token_list_576 = [576, 576, 576]
+# # sparse_token_list_576 = [1, 1, 1]
+# sparse_token_list_48 = [30, 10, 7]
+# sparse_token_list_96 = [120, 64, 48]
+# sparse_token_list_288 = [288, 288, 288]
+
+# sparse_token_dict = {
+#     192: sparse_token_list_192,
+#     128: sparse_token_list_128,
+#     64: sparse_token_list_64,
+#     576: sparse_token_list_576,
+#     48: sparse_token_list_48,
+#     96: sparse_token_list_96,
+#     288: sparse_token_list_288
+# }
+
+
+# recycle_token_list_64 = [5]
+
+# recycle_token_dict = {
+#     64: recycle_token_list_64,
+# }
+# -----------------------------------------------
 
 TASK_LABELS = [
     "existence", "count", "position", "color", "posters", 

@@ -67,7 +67,7 @@ class GenerationMode(ExplicitEnum):
 
 
 class LlamaDynamicvitModel(LlamaModel):
-    def __init__(self, config: LlamaConfig, pruning_loc=[2, 6, 15]):
+    def __init__(self, config: LlamaConfig, pruning_loc=[2,6,15]):
         super(LlamaModel,self).__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -336,11 +336,15 @@ class LlamaDynamicvitModel(LlamaModel):
                         else:
                             cluster_start_time = time.perf_counter()
 
+
+                        recycle_token_num = recycle_token_dict[retained_tokens][layer_dict[layer_idx]]
+
                         merge_sparse_token = iatr_dpc_cluster_and_merge(
                             merge_token_stage2,          # (1, N_drop, C)
                             merge_token_info,            # (1, N_drop)
                             k=8,
-                            score_percentile=0.8         # 可调：0.85 ~ 0.95
+                            score_percentile=0.9,         # 可调：0.85 ~ 0.95
+                            max_recycle_tokens=recycle_token_num
                         )
 
                         if hidden_states.is_cuda:
