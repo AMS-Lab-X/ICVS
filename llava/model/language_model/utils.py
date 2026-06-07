@@ -310,7 +310,7 @@ def cluster_and_merge(x, cluster_num):
     
     return x_merged
 
-def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9, max_recycle_tokens=5):
+def merge_recycled_visual_tokens(x, info_score, k=8, score_percentile=0.9, max_recycle_tokens=5):
     """
     x: (B, N, C) dropped visual tokens
     info_score: (B, N) information score per token
@@ -335,11 +335,11 @@ def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9, max_rec
 
 
 
-    # ---------- 1. cosine distance高维空间使用语义距离代替欧式距离----------
+
     x_norm = x / (x.norm(dim=-1, keepdim=True) + 1e-6)
     dist = 1 - torch.matmul(x_norm, x_norm.transpose(-1, -2))  # (B, N, N)
 
-    # ---------- 2. information-weighted density 信息加权密度----------
+
     knn_dist, knn_idx = torch.topk(dist, k=k, largest=False)
     knn_info = index_points(info_score.unsqueeze(-1), knn_idx).squeeze(-1)
 
@@ -399,3 +399,6 @@ def iatr_dpc_cluster_and_merge(x, info_score, k=8, score_percentile=0.9, max_rec
 
     merged = torch.stack(merged, dim=0).unsqueeze(0)  # (1, K, C)
     return merged
+
+
+iatr_dpc_cluster_and_merge = merge_recycled_visual_tokens

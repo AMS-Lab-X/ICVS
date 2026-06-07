@@ -1,6 +1,6 @@
 # ============================================
-# 文件2: llava/classifier/train_classifier.py  
-# 位置: LLaVA/llava/classifier/train_classifier.py
+
+
 # ============================================
 
 import torch
@@ -14,13 +14,12 @@ from .prompt_classifier import PromptClassifier, CATEGORY_MAPPING
 
 
 class PromptDatasetJSONL(Dataset):
-    """JSONL格式的Prompt分类数据集"""
     def __init__(self, data_path, tokenizer, max_length=128):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.data = []
         
-        # 读取JSONL文件
+
         with open(data_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -35,10 +34,10 @@ class PromptDatasetJSONL(Dataset):
     
     def __getitem__(self, idx):
         item = self.data[idx]
-        prompt = item['text']  # 使用text字段作为prompt
-        category = item['category']  # 类别名称
+        prompt = item['text']
+        category = item['category']
         
-        # 将类别名称转换为ID
+
         label = CATEGORY_MAPPING.get(category, 0)
         
         encoding = self.tokenizer(
@@ -57,7 +56,6 @@ class PromptDatasetJSONL(Dataset):
 
 
 def train_classifier(args):
-    """训练分类器"""
     os.makedirs(args.output_dir, exist_ok=True)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -65,11 +63,11 @@ def train_classifier(args):
     print(f"Number of classes: {args.num_classes}")
     print(f"Category mapping: {CATEGORY_MAPPING}")
     
-    # 加载tokenizer和模型
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = PromptClassifier(args.model_name, args.num_classes).to(device)
     
-    # 准备数据
+
     train_dataset = PromptDatasetJSONL(args.train_data, tokenizer)
     train_loader = DataLoader(
         train_dataset, 
@@ -87,11 +85,11 @@ def train_classifier(args):
             num_workers=4
         )
     
-    # 优化器和损失函数
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss()
     
-    # 学习率调度器
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs
     )
@@ -131,7 +129,7 @@ def train_classifier(args):
               f"Train Acc: {train_acc:.2f}%, "
               f"LR: {scheduler.get_last_lr()[0]:.2e}")
         
-        # 验证
+
         if val_loader:
             model.eval()
             val_correct = 0
@@ -151,7 +149,7 @@ def train_classifier(args):
                     val_total += labels.size(0)
                     val_correct += (predicted == labels).sum().item()
                     
-                    # 统计每个类别的准确率
+
                     for label, pred in zip(labels, predicted):
                         label_id = label.item()
                         category_total[label_id] = category_total.get(label_id, 0) + 1
@@ -161,7 +159,7 @@ def train_classifier(args):
             val_acc = 100 * val_correct / val_total
             print(f"Validation Acc: {val_acc:.2f}%")
             
-            # 打印每个类别的准确率
+
             print("Per-category accuracy:")
             id_to_cat = {v: k for k, v in CATEGORY_MAPPING.items()}
             for cat_id in range(args.num_classes):
@@ -178,11 +176,11 @@ def train_classifier(args):
         scheduler.step()
         print("-" * 80)
     
-    # 保存最终模型和tokenizer
+
     torch.save(model.state_dict(), os.path.join(args.output_dir, 'final_model.pth'))
     tokenizer.save_pretrained(args.output_dir)
     
-    # 保存类别映射
+
     with open(os.path.join(args.output_dir, 'category_mapping.json'), 'w') as f:
         json.dump(CATEGORY_MAPPING, f, indent=2)
     

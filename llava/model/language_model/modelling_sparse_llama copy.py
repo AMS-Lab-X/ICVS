@@ -81,25 +81,20 @@ class LlamaDynamicvitModel(LlamaModel):
         )
 
         self.num_layers = config.num_hidden_layers
-        self.num_forward = 0
-        self.num_token_pool = 0
 
         self.init_token_total_shape = 664       
         self.generate_process_count = 0         
-        self.total_cuda_time = 0
-        self.causal_inference_cuda_time = 0
         # ------------------------------------------- Sparse ----------------------------------------------
         self._use_sdpa = config._attn_implementation == "sdpa"
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
-        self.all_FLOPs = 0
         # Initialize weights and apply final processing
         # self.post_init()
-        # 🔥 用于收集剪枝掩码用于可视化
+
         self.collect_pruning_masks = False
-        self.pruning_masks = {}  # {layer_idx: mask} 只收集Layer 2的mask
+        self.pruning_masks = {}
         self.pruning_masks_info = {}  # {layer_idx: {'v_token_num': ..., 'image_shape': ...}}
         
     def forward(
@@ -125,7 +120,7 @@ class LlamaDynamicvitModel(LlamaModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # 获取当前的 task_id  这里的self指的是self.model
+
         task_id = getattr(self, 'current_task_id', None)
 
         # retrieve input_ids and inputs_embeds
@@ -157,7 +152,7 @@ class LlamaDynamicvitModel(LlamaModel):
             position_ids = torch.arange(
                 past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
             )
-            position_ids = position_ids.unsqueeze(0)    # position_ids.shape：torch.Size([1, 668])，从0到667
+            position_ids = position_ids.unsqueeze(0)
         # print(position_ids)
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -190,7 +185,6 @@ class LlamaDynamicvitModel(LlamaModel):
 
         # ------------------------------------------- Sparse--------------------------------------------
         B, L, _ = hidden_states.shape
-        idx_sprase_layer = 0
         out_pred_prob = None
         init_n = self.init_token_total_shape + self.generate_process_count    # 668
         prev_decision = torch.ones(B, init_n, 1, dtype=hidden_states.dtype, device=hidden_states.device)
@@ -209,22 +203,7 @@ class LlamaDynamicvitModel(LlamaModel):
             m_v_t = m_v_t.softmax(2).mean(1) # [1, 53]
             t_token_idx = torch.where(m_v_t > m_v_t.mean())
 
-            num_token = []
-
-        num_token = []
-
-        if (len(pre_prompt_length_list) != 0 and hidden_states.shape[1] !=1):
-            total_start_event = torch.cuda.Event(enable_timing=True)
-            total_end_event = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize()
-            total_start_event.record()
-
         for layer_idx, decoder_layer in enumerate(self.layers):
-            if (len(pre_prompt_length_list) != 0 and hidden_states.shape[1] !=1):       
-                n = hidden_states.shape[1]                                  # token num
-                d = hidden_states.shape[2]                                  # hidden state size 
-                m = self.layers[layer_idx].mlp.up_proj.out_features         # intermediate size of the FFN
-                self.all_FLOPs += 4 * n * (d**2) + 2 *(n**2) * d + 3*n*d*m 
             # Sparse Layers
             if layer_idx in self.pruning_loc and len(pre_prompt_length_list) != 0 and hidden_states.shape[1] !=1:
                 
@@ -270,7 +249,7 @@ class LlamaDynamicvitModel(LlamaModel):
 
                     attn_logits = layer_outputs[2]
                     
-                    pred_score_vis, s_flag, relation_vis_text = attn_postprocess_topk(attn_logits, v_token_start, v_token_num, text_token_start, t_token_idx, layer_idx,retained_tokens, task_id=task_id) # B, L_v
+                    pred_score_vis, s_flag, relation_vis_text = build_attention_topk_mask(attn_logits, v_token_start, v_token_num, text_token_start, t_token_idx, layer_idx,retained_tokens, task_id=task_id) # B, L_v
                     policy = torch.ones(B, hidden_states.shape[1], dtype=hidden_states.dtype, device=hidden_states.device)
                     policy[:, v_token_start:text_token_start] = pred_score_vis.type(dtype = hidden_states.dtype)
 
@@ -287,7 +266,7 @@ class LlamaDynamicvitModel(LlamaModel):
                     if s_flag and total_sparse_token_idx.shape[1]>0:
 
                         total_sparse_token_idx = torch.where(policy == 0)[1].unsqueeze(0)  
-                        total_sparse_token = batch_index_select(layer_outputs[0], total_sparse_token_idx) #drop的所有token
+                        total_sparse_token = batch_index_select(layer_outputs[0], total_sparse_token_idx)
                         
                         # merge_token_idx_stage1 = torch.where(pred_score_vis==0)[1]
                         # merge_token_stage1 = relation_vis_text[0][merge_token_idx_stage1]
@@ -296,19 +275,19 @@ class LlamaDynamicvitModel(LlamaModel):
                        
                         # merge_token_stage2 = total_sparse_token[:,merge_token_stage2_idx,:]
 
-                        # drop 的所有视觉 token
+
                         merge_token_stage2 = total_sparse_token           # (1, N_drop, C)
-                        # 对应的信息分数（text-vision attention）
+
                         merge_token_info = relation_vis_text[0][
                             torch.where(pred_score_vis == 0)[1]
                         ]  # (N_drop,)
                         merge_token_info = merge_token_info.unsqueeze(0)  # (1, N_drop)
 
-                        merge_sparse_token = iatr_dpc_cluster_and_merge(
+                        merge_sparse_token = merge_recycled_visual_tokens(
                             merge_token_stage2,          # (1, N_drop, C)
                             merge_token_info,            # (1, N_drop)
                             k=8,
-                            score_percentile=0.9         # 可调：0.85 ~ 0.95
+                            score_percentile=0.9
                         )
                         cluster_num = merge_sparse_token.shape[1]
 
@@ -335,7 +314,6 @@ class LlamaDynamicvitModel(LlamaModel):
                         # print(layer_idx, v_token_num)
                         text_token_start = v_token_start + v_token_num
 
-                idx_sprase_layer = idx_sprase_layer + 1 
             # Normal Layers
             else:
                 if output_hidden_states:
@@ -373,17 +351,6 @@ class LlamaDynamicvitModel(LlamaModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-            num_token.append(v_token_num)
-        
-        if len(pre_prompt_length_list) != 0 and hidden_states.shape[1] !=1:
-            total_end_event.record()
-            torch.cuda.synchronize()  
-            total_cuda_time_ms = total_start_event.elapsed_time(total_end_event)
-            self.total_cuda_time += total_cuda_time_ms
-            self.num_forward += 1
-            self.num_token_pool += (sum(num_token) / self.num_layers)
-            FLOPs_avg_sample = (self.all_FLOPs / self.num_forward) * 1e-12
-            print(f"equal token num until now: {self.num_token_pool / self.num_forward} ,total_layers_cuda_time:{self.total_cuda_time},TFLOPs_avg_sample:{FLOPs_avg_sample}")
     
         hidden_states = self.norm(hidden_states)
 
@@ -1682,11 +1649,6 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
 
         this_peer_finished = False  # used by synced_gpus only
         self.model.generate_process_count = 0
-
-        causal_inference_start_event = torch.cuda.Event(enable_timing=True)
-        causal_inference_end_event = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize()
-        causal_inference_start_event.record()
         while True:
             if synced_gpus:
                 # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -1774,13 +1736,6 @@ class LlamaDynamicvitForCausalLM(LlamaForCausalLM):
             if this_peer_finished and not synced_gpus:
                 break
 
-        causal_inference_end_event.record()
-        torch.cuda.synchronize()
-
-        causal_inference_cuda_time_ms = causal_inference_start_event.elapsed_time(causal_inference_end_event)
-        self.model.causal_inference_cuda_time += causal_inference_cuda_time_ms
-        # FLOPs_avg = all_FLOPs /self.num_layers
-        # print(f"total_causal_inference_cuda_time:{self.model.causal_inference_cuda_time}")
         if streamer is not None:
             streamer.end()
 

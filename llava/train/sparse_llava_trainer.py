@@ -231,8 +231,8 @@ class LLaVADynamicTrainer(Trainer):
     def __init__(
         self,
         model: Union[PreTrainedModel, nn.Module] = None,
-        teacher_model: PreTrainedModel = None,  # 新增的参数
-        keep_ratio: List[float] = None,  # 新增的参数
+        teacher_model: PreTrainedModel = None,
+        keep_ratio: List[float] = None,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         args: TrainingArguments = None,
         data_collator: Optional[DataCollator] = None, # type: ignore
@@ -243,13 +243,13 @@ class LLaVADynamicTrainer(Trainer):
         callbacks: Optional[List[TrainerCallback]] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        **kwargs  # 用于捕获其他可能的参数
+        **kwargs
     ):
-        # 将新增的参数保存在类实例中
+
         self.teacher_model = teacher_model
         self.keep_ratio = keep_ratio
 
-        # 调用父类的构造函数，传递除了新增参数之外的所有参数
+
         super().__init__(
             model=model,
             tokenizer=tokenizer,

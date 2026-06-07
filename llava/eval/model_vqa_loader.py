@@ -60,28 +60,6 @@ def summarize_min_max_avg(values):
         "avg": float(statistics.mean(values)),
     }
 
-def summarize_max_avg(values):
-    if not values:
-        return {"max": 0.0, "avg": 0.0}
-    return {
-        "max": float(max(values)),
-        "avg": float(statistics.mean(values)),
-    }
-
-def bytes_to_mb(num_bytes):
-    return float(num_bytes) / (1024 ** 2)
-
-def estimate_model_gpu_memory_bytes(model):
-    total_bytes = 0
-    for param in model.parameters():
-        if param.device.type == "cuda":
-            total_bytes += param.numel() * param.element_size()
-    for buffer in model.buffers():
-        if buffer.device.type == "cuda":
-            total_bytes += buffer.numel() * buffer.element_size()
-    return int(total_bytes)
-
-
 class CustomDataset(Dataset):
     def __init__(self, questions, image_folder, tokenizer, image_processor, model_config):
         self.questions = questions
@@ -191,17 +169,13 @@ def eval_model(args):
         classifier.device = device
         classifier.model.to(device)
         print(f"Classifier moved to device: {device}")
-    model_gpu_memory_bytes = estimate_model_gpu_memory_bytes(model)
-
     classification_stats = {
         'total': 0,
         'correct': 0,
         'by_category': {cat: {'total': 0, 'correct': 0} for cat in ID_TO_CATEGORY.values()}
     }
 
-    total_inference_times = []
     profile_samples = []
-    classifier_stats = None
     if args.visualize_pruning:
         visualizer = PruningMaskVisualizer(
             image_size=336,
@@ -213,7 +187,6 @@ def eval_model(args):
 
 
     retained_tokens = args.retained_tokens
-    print(f"[Eval] runtime retained_tokens={retained_tokens}")
 
     for sample_idx, ((input_ids, image_tensor, image_sizes), line) in enumerate(tqdm(zip(data_loader, questions), total=len(questions))):
         idx = line["question_id"]
@@ -225,18 +198,13 @@ def eval_model(args):
 
         unique_sample_id = f"sample_{sample_idx:05d}_{idx_clean}"
 
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        total_start_time = time.time()
-
         predicted_task_id = None
         predicted_category = None
         confidence = 0.0
 
         if classifier is not None:
             try:
-                predicted_task_id, confidence, predicted_category, _ = classifier.predict(cur_prompt, enable_timing=True)
+                predicted_task_id, confidence, predicted_category, _ = classifier.predict(cur_prompt, enable_timing=False)
 
                 predicted_categories = predicted_category if isinstance(predicted_category, list) else [predicted_category]
                 classification_stats['total'] += 1
@@ -275,6 +243,9 @@ def eval_model(args):
             if hasattr(model, "model") and hasattr(model.model, "last_profile"):
                 sample_profile = dict(model.model.last_profile)
             if sample_profile:
+                sample_profile = {
+                    "prefill_time_ms": float(sample_profile.get("prefill_time_ms", 0.0))
+                }
                 profile_samples.append(sample_profile)
 
                 pruning_masks = model.model.pruning_masks
@@ -303,19 +274,13 @@ def eval_model(args):
                     model.model.pruning_masks = {}
                     model.model.pruning_masks_info = {}
 
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        total_end_time = time.time()
-        total_inference_time_ms = (total_end_time - total_start_time) * 1000.0
-        total_inference_times.append(total_inference_time_ms)
-
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
         ans_id = shortuuid.uuid()
         result = {
             "question_id": idx,
             "prompt": cur_prompt,
+            "clean_prompt": line.get("clean_text", cur_prompt),
             "text": outputs,
             "answer_id": ans_id,
             "model_id": model_name,
@@ -332,174 +297,20 @@ def eval_model(args):
 
     ans_file.close()
 
-    if classifier is not None:
-        classifier_stats = classifier.get_stats()
-
-    overall_inference_stats = {
-        'num_samples': len(total_inference_times),
-        'total_time_ms': sum(total_inference_times),
-        'avg_time_ms': sum(total_inference_times) / len(total_inference_times) if total_inference_times else 0.0,
-        'min_time_ms': min(total_inference_times) if total_inference_times else 0.0,
-        'max_time_ms': max(total_inference_times) if total_inference_times else 0.0,
-    }
-
-    latency_stats = {
-        "end_to_end_time_ms": {
-            "min": float(overall_inference_stats["min_time_ms"]),
-            "max": float(overall_inference_stats["max_time_ms"]),
-            "avg": float(overall_inference_stats["avg_time_ms"]),
-        }
-    }
-    memory_stats = {
-        "model_gpu_memory_mb": {
-            "max": bytes_to_mb(model_gpu_memory_bytes),
-            "avg": bytes_to_mb(model_gpu_memory_bytes),
-        }
-    }
-    complexity_stats = {}
-    profile_stats = {}
-    if profile_samples:
-        prefill_times = [float(x.get("prefill_cuda_time_ms", 0.0)) for x in profile_samples]
-        decode_times = [float(x.get("decode_cuda_time_ms", 0.0)) for x in profile_samples]
-        total_cuda_times = [float(x.get("causal_inference_cuda_time_ms", 0.0)) for x in profile_samples]
-        recycle_times = [float(x.get("recycle_time_ms", 0.0)) for x in profile_samples if "recycle_time_ms" in x]
-        recycle_cluster_only_times = [float(x.get("recycle_cluster_only_time_ms", 0.0)) for x in profile_samples if "recycle_cluster_only_time_ms" in x]
-        recycle_complexity = [float(x.get("recycle_complexity", 0.0)) for x in profile_samples if "recycle_complexity" in x]
-        kv_cache_peak_bytes = [int(x.get("kv_cache_peak_bytes", 0)) for x in profile_samples if "kv_cache_peak_bytes" in x]
-        prefill_peak_memory_bytes = [int(x.get("prefill_peak_memory_bytes", 0)) for x in profile_samples if "prefill_peak_memory_bytes" in x]
-        decode_peak_memory_bytes = [int(x.get("decode_peak_memory_bytes", 0)) for x in profile_samples if "decode_peak_memory_bytes" in x]
-
-        latency_stats["prefill_time_ms"] = summarize_min_max_avg(prefill_times)
-        latency_stats["decode_time_ms"] = summarize_min_max_avg(decode_times)
-        latency_stats["cuda_time_ms"] = summarize_min_max_avg(total_cuda_times)
-        latency_stats["recycle_time_ms"] = summarize_min_max_avg(recycle_times)
-        latency_stats["recycle_cluster_only_time_ms"] = summarize_min_max_avg(recycle_cluster_only_times)
-
-        kv_cache_peak_mb = [bytes_to_mb(x) for x in kv_cache_peak_bytes]
-        prefill_peak_memory_mb = [bytes_to_mb(x) for x in prefill_peak_memory_bytes]
-        decode_peak_memory_mb = [bytes_to_mb(x) for x in decode_peak_memory_bytes]
-        memory_stats["kv_cache_gpu_memory_mb"] = summarize_max_avg(kv_cache_peak_mb)
-        memory_stats["prefill_gpu_memory_mb"] = summarize_max_avg(prefill_peak_memory_mb)
-        memory_stats["decode_gpu_memory_mb"] = summarize_max_avg(decode_peak_memory_mb)
-
-        complexity_stats["recycle_mechanism_complexity"] = summarize_min_max_avg(recycle_complexity)
-
-        profile_stats = {
-            "num_profile_samples": len(profile_samples),
-            "latency": latency_stats,
-            "memory": memory_stats,
-            "complexity": complexity_stats,
-        }
-
-    if classifier_stats is not None:
-        latency_stats["classifier_time_ms"] = {
-            "total": float(classifier_stats["total_time_ms"]),
-            "avg": float(classifier_stats["avg_time_ms"]),
-        }
-        if overall_inference_stats["total_time_ms"] > 0:
-            latency_stats["classifier_overhead_ratio_pct"] = float(
-                (classifier_stats["total_time_ms"] / overall_inference_stats["total_time_ms"]) * 100.0
-            )
-        complexity_stats["classifier_complexity_gflops"] = {
-            "total": float(classifier_stats["total_flops_g"]),
-            "avg": float(classifier_stats["avg_flops_g"]),
-        }
+    prefill_times = [float(x.get("prefill_time_ms", 0.0)) for x in profile_samples]
+    prefill_time_stats = summarize_min_max_avg(prefill_times)
 
     print(f"\n{'='*80}")
     print("INFERENCE STATISTICS")
     print(f"{'='*80}")
 
-    print("\n[Latency Statistics]")
-    print(f"  Total samples: {overall_inference_stats['num_samples']}")
+    print("\n[Efficiency]")
     print(
-        f"  End-to-end time (ms) min/max/avg: "
-        f"{latency_stats['end_to_end_time_ms']['min']:.2f} / "
-        f"{latency_stats['end_to_end_time_ms']['max']:.2f} / "
-        f"{latency_stats['end_to_end_time_ms']['avg']:.2f}"
+        f"  Prefill time (ms) min/max/avg: "
+        f"{prefill_time_stats['min']:.2f} / "
+        f"{prefill_time_stats['max']:.2f} / "
+        f"{prefill_time_stats['avg']:.2f}"
     )
-    if "classifier_time_ms" in latency_stats:
-        print(
-            f"  Classifier time (ms) total/avg: "
-            f"{latency_stats['classifier_time_ms']['total']:.2f} / "
-            f"{latency_stats['classifier_time_ms']['avg']:.2f}"
-        )
-    if "classifier_overhead_ratio_pct" in latency_stats:
-        print(f"  Classifier overhead ratio: {latency_stats['classifier_overhead_ratio_pct']:.2f}%")
-    if "prefill_time_ms" in latency_stats:
-        print(
-            f"  Prefill time (ms) min/max/avg: "
-            f"{latency_stats['prefill_time_ms']['min']:.2f} / "
-            f"{latency_stats['prefill_time_ms']['max']:.2f} / "
-            f"{latency_stats['prefill_time_ms']['avg']:.2f}"
-        )
-    if "decode_time_ms" in latency_stats:
-        print(
-            f"  Decode time (ms) min/max/avg: "
-            f"{latency_stats['decode_time_ms']['min']:.2f} / "
-            f"{latency_stats['decode_time_ms']['max']:.2f} / "
-            f"{latency_stats['decode_time_ms']['avg']:.2f}"
-        )
-    if "cuda_time_ms" in latency_stats:
-        print(
-            f"  CUDA time (ms) min/max/avg: "
-            f"{latency_stats['cuda_time_ms']['min']:.2f} / "
-            f"{latency_stats['cuda_time_ms']['max']:.2f} / "
-            f"{latency_stats['cuda_time_ms']['avg']:.2f}"
-        )
-    if "recycle_time_ms" in latency_stats:
-        print(
-            f"  Recycle time (ms) min/max/avg: "
-            f"{latency_stats['recycle_time_ms']['min']:.2f} / "
-            f"{latency_stats['recycle_time_ms']['max']:.2f} / "
-            f"{latency_stats['recycle_time_ms']['avg']:.2f}"
-        )
-    if "recycle_cluster_only_time_ms" in latency_stats:
-        print(
-            f"  Recycle cluster-only time (ms) min/max/avg: "
-            f"{latency_stats['recycle_cluster_only_time_ms']['min']:.2f} / "
-            f"{latency_stats['recycle_cluster_only_time_ms']['max']:.2f} / "
-            f"{latency_stats['recycle_cluster_only_time_ms']['avg']:.2f}"
-        )
-
-    print("\n[GPU Memory Statistics]")
-    print(
-        f"  Model GPU memory (MB) max/avg: "
-        f"{memory_stats['model_gpu_memory_mb']['max']:.2f} / "
-        f"{memory_stats['model_gpu_memory_mb']['avg']:.2f}"
-    )
-    if "kv_cache_gpu_memory_mb" in memory_stats:
-        print(
-            f"  KV cache GPU memory (MB) max/avg: "
-            f"{memory_stats['kv_cache_gpu_memory_mb']['max']:.2f} / "
-            f"{memory_stats['kv_cache_gpu_memory_mb']['avg']:.2f}"
-        )
-    if "prefill_gpu_memory_mb" in memory_stats:
-        print(
-            f"  Prefill GPU memory (MB) max/avg: "
-            f"{memory_stats['prefill_gpu_memory_mb']['max']:.2f} / "
-            f"{memory_stats['prefill_gpu_memory_mb']['avg']:.2f}"
-        )
-    if "decode_gpu_memory_mb" in memory_stats:
-        print(
-            f"  Decode GPU memory (MB) max/avg: "
-            f"{memory_stats['decode_gpu_memory_mb']['max']:.2f} / "
-            f"{memory_stats['decode_gpu_memory_mb']['avg']:.2f}"
-        )
-
-    print("\n[Computational Complexity Statistics]")
-    if "classifier_complexity_gflops" in complexity_stats:
-        print(
-            f"  Classifier complexity (GFLOPs) total/avg: "
-            f"{complexity_stats['classifier_complexity_gflops']['total']:.4f} / "
-            f"{complexity_stats['classifier_complexity_gflops']['avg']:.6f}"
-        )
-    if "recycle_mechanism_complexity" in complexity_stats:
-        print(
-            f"  Recycle mechanism complexity min/max/avg: "
-            f"{complexity_stats['recycle_mechanism_complexity']['min']:.2f} / "
-            f"{complexity_stats['recycle_mechanism_complexity']['max']:.2f} / "
-            f"{complexity_stats['recycle_mechanism_complexity']['avg']:.2f}"
-        )
 
     if classifier is not None and classification_stats['total'] > 0:
         print(f"\n{'='*80}")
@@ -527,18 +338,8 @@ def eval_model(args):
 
     inference_stats_file = answers_file.replace('.jsonl', '_inference_stats.json')
     inference_stats_output = {
-        'overall_inference': overall_inference_stats,
-        'latency_statistics': latency_stats,
-        'gpu_memory_statistics': memory_stats,
-        'computational_complexity_statistics': complexity_stats,
+        'prefill_time_ms': prefill_time_stats,
     }
-    if classifier_stats is not None:
-        inference_stats_output['classifier'] = classifier_stats
-        if overall_inference_stats['total_time_ms'] > 0:
-            inference_stats_output['classifier_overhead_ratio'] = (classifier_stats['total_time_ms'] / overall_inference_stats['total_time_ms']) * 100.0
-            inference_stats_output['model_generation_time_ms'] = overall_inference_stats['total_time_ms'] - classifier_stats['total_time_ms']
-    if profile_stats:
-        inference_stats_output['model_profile'] = profile_stats
 
     with open(inference_stats_file, 'w') as f:
         json.dump(inference_stats_output, f, indent=2)
