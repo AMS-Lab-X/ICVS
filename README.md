@@ -9,8 +9,8 @@
 
 ## Installation
 
-```bash
 1. Clone the repository
+```bash
 git clone https://github.com/AMS-Lab-X/ICVS.git
 cd ICVS
 '''
@@ -24,6 +24,7 @@ pip install transformers==4.37.2
 pip install flash_attn==2.3.3
 ```
 3. Download Multimodal Benchmark
+
 Please follow the detailed instruction in [LLaVA-Evaluation](https://github.com/haotian-liu/LLaVA/blob/main/docs/Evaluation.md).
 ```
 
