@@ -9,18 +9,18 @@
 
 ## Installation
 
-1. Clone the repository
+1. Clone this repository and navigate to SparseVLMs folder
 ```bash
-git clone https://github.com/AMS-Lab-X/ICVS.git
-cd ICVS
-'''
+git clone https://github.com/Gumpest/SparseVLMs.git
+cd SparseVLMs
+```
 
 2. Install necessary package
 ```Shell
-conda create -n ICVS python=3.10 -y
-conda activate ICVS
+conda create -n SparseVLMs python=3.10 -y
+conda activate SparseVLMs
 pip install -e .
-pip install transformers==4.37.2
+pip install transformers==4.37.0
 pip install flash_attn==2.3.3
 ```
 3. Download Multimodal Benchmark
