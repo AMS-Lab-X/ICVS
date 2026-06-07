@@ -10,17 +10,21 @@
 ## Installation
 
 ```bash
-# Clone the repository
+1. Clone the repository
 git clone https://github.com/AMS-Lab-X/ICVS.git
 cd ICVS
-# Install necessary package
+'''
+
+2. Install necessary package
+```Shell
 conda create -n ICVS python=3.10 -y
 conda activate ICVS
 pip install -e .
 pip install transformers==4.37.2
 pip install flash_attn==2.3.3
-# Download Multimodal Benchmark
-Please follow the detailed instruction in https://github.com/haotian-liu/LLaVA/blob/main/docs/Evaluation.md
+```
+3. Download Multimodal Benchmark
+Please follow the detailed instruction in [LLaVA-Evaluation](https://github.com/haotian-liu/LLaVA/blob/main/docs/Evaluation.md).
 ```
 
 ## Supported Models
