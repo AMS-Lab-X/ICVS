@@ -22,7 +22,7 @@ Efficient inference for vision-language models (VLMs) via **instruction-conditio
 
 ```bash
 git clone https://github.com/AMS-Lab-X/ICVS.git
-cd SparseVLMs
+cd ICVS
 ```
 
 ### 2. Create conda environment and install dependencies
@@ -105,20 +105,6 @@ More benchmark results can be found in our paper.
 
 ---
 
-## Citation
-
-If you find this work useful, please cite:
-
-```bibtex
-@article{cao2026icvs,
-  title={Instruction-conditioned visual token sparsification for efficient vision-language model inference},
-  author={Cao, Weidong and Zhang, Xi and Li, Chengyang and Liu, Danjun and Xie, Yongqiang and Li, Zhongbo},
-  journal={Information Fusion},
-  year={2026}
-}
-```
-
----
 
 ## Acknowledgment
 
@@ -126,8 +112,6 @@ This repository is built upon several excellent open-source projects:
 
 - SparseVLMs
 - LLaVA
-- MiniGemini
-- VideoLLaVA
 
 We sincerely thank the authors for making their code publicly available.
 
