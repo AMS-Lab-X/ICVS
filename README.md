@@ -49,6 +49,8 @@ TASK_TO_HEAD_MAP
 ```
 The hard-coded dictionary is only the storage form of the offline task-to-head lookup table for efficient access during inference. It is not a replacement for the entire instruction-conditioned routing process.
 
+The offline task-to-head lookup table is constructed before inference. Specifically, for each predefined instruction category, we evaluate different attention heads under the same visual token pruning setting on a held-out validation set. The head that achieves the best accuracy-efficiency trade-off for each task category is selected as the task-preferred head. The selected task-head pairs are then recorded in TASK_TO_HEAD_MAP and directly used during inference to avoid additional routing overhead.
+
 ### 2. Density-Aware Token Recycling
 After sparse token selection, ICVS further aggregates part of the discarded visual tokens into compact representative tokens. This density-aware token recycling strategy helps preserve complementary visual information and mitigates information loss under aggressive sparsification.
 
