@@ -49,7 +49,7 @@ TASK_TO_HEAD_MAP
 ```
 The hard-coded dictionary is only the storage form of the offline task-to-head lookup table for efficient access during inference. It is not a replacement for the entire instruction-conditioned routing process.
 
-The offline task-to-head lookup table is constructed before inference. Specifically, for each predefined instruction category, we evaluate different attention heads under the same visual token pruning setting on a held-out validation set. The head that achieves the best accuracy-efficiency trade-off for each task category is selected as the task-preferred head. The selected task-head pairs are then recorded in TASK_TO_HEAD_MAP and directly used during inference to avoid additional routing overhead.
+The offline task-to-head lookup table is constructed before inference. Specifically, for each predefined instruction category, we evaluate different attention heads under the same visual token pruning setting on a held-out validation set. The head that achieves the best accuracy-efficiency trade-off for each task category is selected as the task-preferred head. The selected task-head pairs are then recorded in `TASK_TO_HEAD_MAP` and directly used during inference to avoid additional routing overhead.
 
 ### 2. Density-Aware Token Recycling
 After sparse token selection, ICVS further aggregates part of the discarded visual tokens into compact representative tokens. This density-aware token recycling strategy helps preserve complementary visual information and mitigates information loss under aggressive sparsification.
@@ -159,7 +159,7 @@ python -m llava.eval.model_vqa_loader \
     --image-folder /path/to/images \
     --answers-file /path/to/answers.jsonl \
     --retained_tokens 64 \
-    --classifier-path ./checkpoints/prompt_classifier_add/best_model.pth
+    --classifier-path ./checkpoints/prompt_classifier/best_model.pth
 ```
 
 ---
@@ -176,7 +176,7 @@ python -m llava.eval.model_vqa_loader \
 
 ---
 
-### 3. Download evaluation benchmarks
+## Evaluation Benchmarks
 
 Please follow the official LLaVA evaluation instructions:
 
@@ -237,6 +237,7 @@ Discarded visual tokens are not simply removed. ICVS aggregates part of them int
 - Qwen2.5-VL
 
 The framework keeps the pretrained VLM backbone frozen and only performs inference-time visual token sparsification.
+The current released evaluation scripts mainly focus on LLaVA-1.5. The framework can be extended to LLaVA-NeXT and Qwen2.5-VL.
 
 ---
 
