@@ -98,9 +98,8 @@ You may specify the model path in the evaluation script, for example:
 
 The prompt classifier checkpoint can be downloaded from:
 
-```text
-https://drive.google.com/file/d/1qTWM9WM4rEnqWUgBbA5B61x-JJboQ7mX/view?usp=drive_link
-```
+[Download prompt classifier checkpoint](https://drive.google.com/uc?export=download&id=1qTWM9WM4rEnqWUgBbA5B61x-JJboQ7mX)
+
 After downloading, place the checkpoint at:
 
 ```text
